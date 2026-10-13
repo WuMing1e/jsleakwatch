@@ -914,7 +914,10 @@ async function renderFindings() {
               <td class="shrink">${sevChip(r.severity)}</td>
               <td><div class="cell-clip w-md" title="${esc(r.rule_name)}">${esc(r.rule_name)}${sourceTag(r)}</div></td>
               <td><span class="val-mask">${esc(r.match_masked)}</span></td>
-              <td class="muted"><div class="cell-clip w-sm" title="${esc(r.target_name || '')}">${esc(r.target_name || '')}</div></td>
+              <td class="muted">
+                <div class="cell-clip w-sm" title="${esc(r.target_name || '')}">${esc(r.target_name || '')}</div>
+                ${r.reuse_sites > 1 ? `<span class="tag tag-warn" title="同一命中值出现在 ${r.reuse_sites} 个站点">复用 ${r.reuse_sites} 站</span>` : ''}
+              </td>
               <td><div class="cell-clip w-lg mono" style="font-size:11.5px;color:var(--text-dim)" title="${esc(r.asset_url)}">${esc(r.asset_url)}</div></td>
               <td class="shrink">${statusTag(r.status)}</td>
               <td class="shrink">${verdictChip(r)}</td>
@@ -1039,6 +1042,7 @@ async function openFinding(id) {
       </dl>
       <div class="section-title">命中上下文</div>
       <div class="codeblock">${marked || '（无上下文）'}</div>
+      ${reuseSection(f)}
       ${aiSection(f)}
       <div class="section-title">备注</div>
       <textarea id="d-notes" rows="3" placeholder="记录复核结论、修复进展或负责人">${esc(f.notes || '')}</textarea>
@@ -1058,6 +1062,26 @@ async function openFinding(id) {
   $('#drawer').hidden = false;
   $('#scrim').hidden = false;
   state.openFindingId = id;
+}
+
+/* 同一命中值的其他出现位置: 一把密钥被多处复用, 往往比单条命中更值得追 */
+function reuseSection(f) {
+  const reuse = f.reuse || [];
+  if (!reuse.length) return '';
+  const sites = new Set(reuse.map((r) => r.target_name || r.target_id));
+  return `<div class="section-title">同一凭证的其他出现位置 <span class="muted" style="font-weight:400">· ${reuse.length} 处 / ${sites.size} 个站点</span></div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      ${reuse.slice(0, 12).map((r) => `
+        <div class="list-row" style="gap:8px;align-items:center">
+          <span class="grow">
+            <b>${esc(r.target_name || ('#' + r.target_id))}</b>
+            <span class="muted mono" style="font-size:11.5px">${esc(r.asset_url)}</span>
+          </span>
+          ${statusTag(r.status)}
+          <button class="btn btn-sm" data-act="open-finding" data-id="${r.id}">查看</button>
+        </div>`).join('')}
+      ${reuse.length > 12 ? `<div class="muted" style="font-size:11.5px">还有 ${reuse.length - 12} 处…</div>` : ''}
+    </div>`;
 }
 
 function aiSection(f) {
@@ -1090,29 +1114,60 @@ async function renderAssets() {
   const page = state.assetsPage || 0;
   const per = state.assetsPerPage || 25;
   const params = new URLSearchParams({ limit: String(per), offset: String(page * per) });
-  if (q.target) params.set('target', q.target);
+  if (q.target) params.set('target_id', q.target);
   if (q.q) params.set('q', q.q);
-  const [data, targetData] = await Promise.all([api('/api/assets?' + params), api('/api/targets?limit=0')]);
+  const changeParams = new URLSearchParams({ limit: '80' });
+  if (q.target) changeParams.set('target_id', q.target);
+  const [data, targetData, changes] = await Promise.all([
+    api('/api/assets?' + params),
+    api('/api/targets?limit=0'),
+    apiList('/api/changes?' + changeParams),
+  ]);
   const targets = targetData.items;
+  const view = state.assetsView || 'list';
   $('#view').innerHTML = `
     <section class="card">
       <div class="toolbar">
+        <div class="seg">
+          <button class="${view === 'list' ? 'active' : ''}" data-act="assets-view" data-value="list">资产清单</button>
+          <button class="${view === 'changes' ? 'active' : ''}" data-act="assets-view" data-value="changes">最近变更</button>
+        </div>
         <select style="width:auto;min-width:170px" data-act="asset-target">
           <option value="">全部站点</option>
           ${targets.map((t) => `<option value="${t.id}"${String(q.target) === String(t.id) ? ' selected' : ''}>${esc(t.name)}</option>`).join('')}
         </select>
+        ${view === 'list' ? `
         <div class="search" style="width:240px">${icon('search')}
           <input type="text" id="a-q" placeholder="按地址过滤" value="${esc(q.q || '')}">
-        </div>
+        </div>` : ''}
         <div class="spacer"></div>
-        <span class="muted">共 ${data.total} 个资产</span>
+        <span class="muted">${view === 'list' ? `共 ${data.total} 个资产` : `${changes.length} 次内容变更`}</span>
       </div>
+      ${view === 'changes' ? changesTable(changes) : assetsTable(data, q)}
+      ${view === 'list' && data.items.length ? listPager('assets', page, data.total, data.items.length, per) : ''}
+    </section>`;
+  const input = $('#a-q');
+  if (input) {
+    let timer = null;
+    input.oninput = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        state.assetsPage = 0;
+        goto('assets', { ...(q.target ? { target: q.target } : {}), q: input.value.trim() });
+      }, 340);
+    };
+  }
+}
+
+/* 资产清单 */
+function assetsTable(data, q) {
+  return `
       <div class="table-wrap">
         ${data.items.length ? `<table>
           <thead><tr>
             <th class="shrink">类型</th><th>地址</th><th class="shrink">站点</th>
             <th class="shrink">大小</th><th class="shrink">指纹</th>
-            <th class="shrink">最近采集</th><th class="shrink">内容变更</th>
+            <th class="shrink">最近采集</th><th class="shrink">内容变更</th><th class="shrink">历史</th>
           </tr></thead>
           <tbody>${data.items.map((a) => `
             <tr>
@@ -1125,24 +1180,100 @@ async function renderAssets() {
               <td class="shrink nowrap" style="font-size:11.5px">${a.last_changed_at
                 ? `<span class="tag tag-warn">${fromNow(a.last_changed_at)}</span>`
                 : '<span class="muted">未变更</span>'}</td>
+              <td class="shrink nowrap">
+                ${a.versions > 1
+                  ? `<button class="btn btn-sm" data-act="asset-history" data-id="${a.id}">${a.versions} 版</button>`
+                  : '<span class="muted" style="font-size:11.5px">—</span>'}
+              </td>
             </tr>`).join('')}</tbody></table>`
           : `<div class="empty">${icon('filecode')}暂无资产，先添加站点并执行一次扫描</div>`}
-      </div>
-      ${data.items.length ? listPager('assets', page, data.total, data.items.length, per) : ''}
-    </section>`;
-  const input = $('#a-q');
-  let timer = null;
-  input.oninput = () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      state.assetsPage = 0;
-      goto('assets', { ...(q.target ? { target: q.target } : {}), q: input.value.trim() });
-    }, 340);
-  };
+      </div>`;
+}
+
+/* 跨站变更流: 谁变了、变了什么 */
+function changesTable(changes) {
+  if (!changes.length) {
+    return `<div class="empty">${icon('filecode')}还没有内容变更记录。资产内容变化后，这里会列出新增与消失的字符串。</div>`;
+  }
+  return `<div class="table-wrap"><table>
+    <thead><tr>
+      <th class="shrink">时间</th><th class="shrink">站点</th><th>文件</th>
+      <th class="shrink">变化</th><th>新增 / 消失的字符串</th>
+    </tr></thead>
+    <tbody>${changes.map((c) => `
+      <tr>
+        <td class="shrink muted nowrap" style="font-size:11.5px">${fromNow(c.created_at)}</td>
+        <td class="shrink muted">${esc(c.target_name || ('#' + c.target_id))}</td>
+        <td><div class="url-cell" style="max-width:330px" title="${esc(c.url)}">${esc(c.url)}</div></td>
+        <td class="shrink nowrap">
+          ${c.added_count ? `<span class="tag tag-ok">+${c.added_count}</span>` : ''}
+          ${c.removed_count ? `<span class="tag tag-err">-${c.removed_count}</span>` : ''}
+        </td>
+        <td>
+          <div class="diff-cell">
+            ${diffLines(c)}
+          </div>
+        </td>
+      </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function diffLines(change) {
+  const added = (change.added || []).slice(0, 12);
+  const removed = (change.removed || []).slice(0, 6);
+  const more = [];
+  if ((change.added || []).length > added.length) more.push(`+${change.added.length - added.length}`);
+  if ((change.removed || []).length > removed.length) more.push(`-${change.removed.length - removed.length}`);
+  return [
+    ...added.map((s) => `<div class="diff-add mono" title="${esc(s)}">+ ${esc(s)}</div>`),
+    ...removed.map((s) => `<div class="diff-del mono" title="${esc(s)}">- ${esc(s)}</div>`),
+    more.length ? `<div class="muted" style="font-size:11.5px">还有 ${more.join(' / ')} 条…</div>` : '',
+  ].join('');
 }
 
 function assetKind(kind) {
   return { html: '页面', script: '脚本', inline: '内联', map: '映射', config: '配置' }[kind] || kind;
+}
+
+/* 单个资产的内容版本历史: 每版列出新增与消失的字符串 */
+async function openAssetHistory(aid) {
+  let info;
+  try { info = await api(`/api/assets/${aid}/history`); }
+  catch (err) { toast('加载失败: ' + err.message, 'err'); return; }
+  const versions = info.versions || [];
+  $('#modal').innerHTML = `
+    <div class="modal-head">
+      <h2>内容变更历史</h2>
+      <button class="btn btn-ghost btn-icon btn-sm" data-act="close-modal">${icon('x', 14)}</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-hint">
+        ${esc(info.asset.target_name || '')} · <span class="mono">${esc(info.asset.url)}</span>
+      </div>
+      <div class="field-hint">
+        只保存字符串签名，命中的密钥与高熵串都已掩码，不落 JS 原文；每个资产保留最近 12 版。
+      </div>
+      ${versions.length ? versions.map((v, index) => `
+        <div style="border-top:1px solid var(--line-soft);padding-top:10px;display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <b>${fmtTime(v.created_at)}</b>
+            <span class="muted" style="font-size:11.5px">${fromNow(v.created_at)}</span>
+            ${index === 0 ? '<span class="tag tag-ok">当前版本</span>' : ''}
+            <span class="muted mono" style="font-size:11px">${esc((v.sha256 || '').slice(0, 8))}</span>
+            <span class="muted" style="font-size:11.5px">${fmtBytes(v.size)} · ${v.lines} 行 · ${v.findings} 处命中</span>
+            ${v.added_count ? `<span class="tag tag-ok">+${v.added_count}</span>` : ''}
+            ${v.removed_count ? `<span class="tag tag-err">-${v.removed_count}</span>` : ''}
+          </div>
+          ${v.added_count || v.removed_count
+            ? `<div class="diff-cell">${diffLines(v)}</div>`
+            : '<div class="muted" style="font-size:11.5px">这是首次采集的基线版本</div>'}
+        </div>`).join('')
+        : '<div class="muted">还没有版本记录，下次扫描内容变化时会生成。</div>'}
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-act="close-modal">关闭</button>
+    </div>`;
+  $('#modal-scrim').hidden = false;
 }
 
 function fmtBytes(n) {
@@ -2057,6 +2188,8 @@ async function handleAction(el, evt) {
   if (act === 'bulk-status') return bulkFindingStatus(el.dataset.status);
   if (act === 'bulk-del-findings') return bulkDeleteFindings();
   if (act === 'findings-clear') { state.selected.clear(); return renderFindings(); }
+  if (act === 'assets-view') { state.assetsView = el.dataset.value; return renderAssets(); }
+  if (act === 'asset-history') { stop(event); return openAssetHistory(Number(el.dataset.id)); }
   if (act === 'finding-status') { stop(event); return setFindingStatus(Number(el.dataset.id), el.dataset.status); }
   if (act === 'save-notes') {
     const notes = $('#d-notes').value;

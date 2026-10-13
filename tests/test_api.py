@@ -137,7 +137,7 @@ def test_targets_bulk_all_matching(client) -> None:
     client.delete(f"/api/targets/{mismatched['id']}")
 
 
-def _make_finding(client, fingerprint: str, target_id: int) -> int:
+def _make_finding(client, fingerprint: str, target_id: int, match_sha: str = "") -> int:
     from app import db
 
     fid = db.execute(
@@ -145,7 +145,7 @@ def _make_finding(client, fingerprint: str, target_id: int) -> int:
         "match_masked, match_sha256, asset_url, first_seen_at, last_seen_at, status) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,'new')",
         (target_id, "test-rule", "测试规则", "high", "test", fingerprint,
-         "abcd...wxyz(len=32)", "sha-" + fingerprint, "http://del.test/app.js",
+         "abcd...wxyz(len=32)", match_sha or ("sha-" + fingerprint), "http://del.test/app.js",
          db.utcnow(), db.utcnow()),
     ).lastrowid
     return int(fid or 0)
@@ -173,6 +173,57 @@ def test_finding_delete_and_bulk_delete(client) -> None:
     assert client.post("/api/findings/bulk", json={"ids": [ids[2]], "status": "bogus"}).status_code == 400
 
     client.delete(f"/api/targets/{target['id']}")  # 级联清掉剩下的发现
+
+
+def test_findings_reuse_across_sites(client) -> None:
+    """同一命中值出现在多个站点时, 列表要标出复用站点数, 详情要能互相跳。"""
+    from app import db
+
+    first = client.post("/api/targets", json={"name": "复用甲站", "base_url": "http://reuse-a.test"}).json()
+    second = client.post("/api/targets", json={"name": "复用乙站", "base_url": "http://reuse-b.test"}).json()
+    shared = "same-value-sha"
+    fid_a = _make_finding(client, "fp-reuse-a", first["id"], match_sha=shared)
+    fid_b = _make_finding(client, "fp-reuse-b", second["id"], match_sha=shared)
+
+    listed = client.get("/api/findings", params={"q": "abcd", "limit": 100}).json()["items"]
+    row = next(item for item in listed if item["id"] == fid_a)
+    assert row["reuse_count"] == 2 and row["reuse_sites"] == 2
+
+    detail = client.get(f"/api/findings/{fid_a}").json()
+    assert [item["id"] for item in detail["reuse"]] == [fid_b]
+    assert detail["reuse"][0]["target_name"] == "复用乙站"
+
+    client.delete(f"/api/targets/{first['id']}")
+    client.delete(f"/api/targets/{second['id']}")
+
+
+def test_asset_history_and_changes_api(client) -> None:
+    from app import asset_history, db
+
+    target = client.post("/api/targets", json={"name": "变更站", "base_url": "http://diff.test"}).json()
+    aid = int(db.execute(
+        "INSERT INTO assets(target_id, url, sha256, size, first_seen_at, last_seen_at) "
+        "VALUES(?,?,?,?,?,?)",
+        (target["id"], "http://diff.test/app.js", "sha-a", 10, db.utcnow(), db.utcnow()),
+    ).lastrowid or 0)
+    asset_history.record_version(target["id"], aid, "http://diff.test/app.js", 'var a = "one";', "sha-a")
+    asset_history.record_version(target["id"], aid, "http://diff.test/app.js",
+                                 'var a = "one"; var b = "https://new.test/api";', "sha-b")
+
+    hist = client.get(f"/api/assets/{aid}/history").json()
+    assert len(hist["versions"]) == 2
+    assert hist["versions"][0]["added"] == ["https://new.test/api"]
+    assert hist["asset"]["target_name"] == "变更站"
+
+    feed = client.get("/api/changes", params={"target_id": target["id"]}).json()
+    assert feed["total"] == 1 and feed["items"][0]["target_name"] == "变更站"
+
+    assets = client.get("/api/assets", params={"target_id": target["id"]}).json()["items"]
+    assert assets[0]["versions"] == 2
+    assert client.get("/api/assets", params={"target": target["id"]}).json()["total"] == 1  # 旧参数名兼容
+
+    assert client.get("/api/assets/999999/history").status_code == 404
+    client.delete(f"/api/targets/{target['id']}")
 
 
 def test_targets_bulk_import(client) -> None:

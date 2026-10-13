@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import ai, db, gating
+from . import ai, asset_history, db, gating
 from .config import SETTINGS, ScanConfig
 from .discover import Extractor, Candidate, config_probe_candidates
 from .fetcher import Fetcher
@@ -40,6 +40,7 @@ class ScanResult:
     assets_new: int = 0
     assets_skipped: int = 0
     assets_failed: int = 0
+    assets_changed: int = 0
     bytes_fetched: int = 0
     findings_total: int = 0
     new_findings: list[dict[str, Any]] = field(default_factory=list)
@@ -233,6 +234,13 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                             db.execute("UPDATE assets SET recheck=0 WHERE id=?", (asset_id,))
                         asset_dets = _detect(detector, resp.text, target_id, cand.url,
                                              cfg.store_raw_secrets)
+                        recorded = asset_history.record_version(
+                            target_id, asset_id, cand.url, resp.text, sha,
+                            secret_hashes=[det.sha256 for det in asset_dets],
+                            findings=len(asset_dets),
+                        )
+                        if recorded.get("changed"):
+                            result.assets_changed += 1
                         for det in asset_dets:
                             detections.append((cand.url, cand.kind, det))
                         if (external_analyzers

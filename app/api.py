@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, ai, db, gating
+from . import __version__, ai, asset_history, db, gating
 from .config import BASE_DIR, SETTINGS
 from .importers.gitleaks import parse_toml, rule_to_dict
 from .analyzers import analyzer_specs
@@ -710,9 +710,29 @@ def list_findings(
         f"LEFT JOIN targets t ON t.id = f.target_id {clause} ORDER BY {order} LIMIT ? OFFSET ?",
         (*params, limit, offset),
     )
-    return {"total": total, "items": [_finding_dict(row) for row in rows],
+    items = [_finding_dict(row) for row in rows]
+    _attach_reuse_counts(items)
+    return {"total": total, "items": items,
             "limit": limit, "offset": offset,
             "gated": {"applied": bool(gate_sql and not include_gated), **gating.hidden_count()}}
+
+
+def _attach_reuse_counts(items: list[dict[str, Any]]) -> None:
+    """给列表页的每一条标注"同一命中值出现在几个站点"。"""
+    hashes = {item["match_sha256"] for item in items if item.get("match_sha256")}
+    if not hashes:
+        return
+    marks = ",".join("?" * len(hashes))
+    rows = db.query(
+        f"SELECT match_sha256, COUNT(*) c, COUNT(DISTINCT target_id) sites "
+        f"FROM findings WHERE match_sha256 IN ({marks}) GROUP BY match_sha256",
+        list(hashes),
+    )
+    seen = {row["match_sha256"]: (row["c"], row["sites"]) for row in rows}
+    for item in items:
+        count, sites = seen.get(item.get("match_sha256"), (1, 1))
+        item["reuse_count"] = count
+        item["reuse_sites"] = sites
 
 
 @app.get("/api/findings/export.csv")
@@ -757,7 +777,22 @@ def get_finding(fid: int) -> dict[str, Any]:
     data = _finding_dict(row)
     if db.get_setting("store_raw_reveal", False) and row["raw_value"]:
         data["raw_value"] = row["raw_value"]
+    data["reuse"] = reuse_of(row["match_sha256"], exclude_id=fid)
     return data
+
+
+def reuse_of(match_sha256: str, exclude_id: int = 0) -> list[dict[str, Any]]:
+    """同一个命中值还出现在哪些站点/文件 —— 同一把密钥被多处复用是最值得追的线索。"""
+    if not match_sha256:
+        return []
+    rows = db.query(
+        "SELECT f.id, f.target_id, f.asset_url, f.status, f.severity, f.rule_id, "
+        "       f.first_seen_at, t.name AS target_name "
+        "  FROM findings f LEFT JOIN targets t ON t.id = f.target_id "
+        " WHERE f.match_sha256 = ? AND f.id <> ? ORDER BY f.first_seen_at DESC LIMIT 50",
+        (match_sha256, exclude_id),
+    )
+    return [{k: row[k] for k in row.keys()} for row in rows]
 
 
 @app.patch("/api/findings/{fid}")
@@ -818,8 +853,10 @@ def delete_finding(fid: int) -> dict[str, Any]:
 # ---------------------------------------------------------------- 资产 / 扫描记录 / 事件
 
 @app.get("/api/assets")
-def list_assets(target_id: int | None = None, q: str = "", limit: int = Query(200, ge=1, le=2000),
-                offset: int = 0) -> dict[str, Any]:
+def list_assets(target_id: int | None = None, target: int | None = None, q: str = "",
+                limit: int = Query(200, ge=1, le=2000), offset: int = 0) -> dict[str, Any]:
+    # 前端历史版本用的是 target=, 两个名字都收, 免得筛选静默失效
+    target_id = target_id or target
     where, params = [], []
     if target_id:
         where.append("a.target_id = ?")
@@ -833,7 +870,45 @@ def list_assets(target_id: int | None = None, q: str = "", limit: int = Query(20
         f"SELECT a.*, t.name AS target_name FROM assets a LEFT JOIN targets t ON t.id=a.target_id "
         f"{clause} ORDER BY a.last_seen_at DESC LIMIT ? OFFSET ?", (*params, limit, offset),
     )
-    return {"total": total, "items": [{k: row[k] for k in row.keys()} for row in rows]}
+    items = [{k: row[k] for k in row.keys()} for row in rows]
+    ids = [item["id"] for item in items]
+    counts: dict[int, int] = {}
+    if ids:
+        marks = ",".join("?" * len(ids))
+        counts = {
+            row["asset_id"]: row["c"]
+            for row in db.query(
+                f"SELECT asset_id, COUNT(*) c FROM asset_versions "
+                f"WHERE asset_id IN ({marks}) GROUP BY asset_id", ids)
+        }
+    for item in items:
+        item["versions"] = counts.get(item["id"], 0)
+    return {"total": total, "items": items}
+
+
+@app.get("/api/changes")
+def list_changes(
+    target_id: int | None = None,
+    limit: int = Query(60, ge=1, le=300),
+    hours: int = Query(0, ge=0, le=24 * 90),
+    only_diff: bool = True,
+) -> dict[str, Any]:
+    """跨站变更流: 最近哪些 JS 变了、变了什么。"""
+    items = asset_history.recent_changes(target_id=target_id, limit=limit, hours=hours,
+                                         only_diff=only_diff)
+    return {"total": len(items), "items": items}
+
+
+@app.get("/api/assets/{aid}/history")
+def asset_history_endpoint(aid: int, limit: int = Query(12, ge=1, le=50)) -> dict[str, Any]:
+    row = db.query_one("SELECT * FROM assets WHERE id=?", (aid,))
+    if row is None:
+        raise HTTPException(404, "资产不存在")
+    target = db.query_one("SELECT name FROM targets WHERE id=?", (row["target_id"],))
+    return {
+        "asset": {**{k: row[k] for k in row.keys()}, "target_name": target["name"] if target else ""},
+        "versions": asset_history.history(aid, limit),
+    }
 
 
 @app.get("/api/scans")

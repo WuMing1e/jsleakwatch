@@ -136,6 +136,24 @@ CREATE TABLE IF NOT EXISTS rule_overrides (
     severity TEXT
 );
 
+-- 资产内容版本: 每次内容变化保存一条"字符串签名", 用来回答"这次改动新增了什么"。
+-- 不存 JS 原文 —— 明文不外泄是底线, 命中的密钥在签名里已掩码。
+CREATE TABLE IF NOT EXISTS asset_versions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id   INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    target_id  INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    url        TEXT NOT NULL,
+    sha256     TEXT NOT NULL,
+    size       INTEGER NOT NULL DEFAULT 0,
+    lines      INTEGER NOT NULL DEFAULT 0,
+    strings    TEXT NOT NULL DEFAULT '[]',
+    added      TEXT NOT NULL DEFAULT '[]',
+    removed    TEXT NOT NULL DEFAULT '[]',
+    findings   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE (asset_id, sha256)
+);
+
 CREATE TABLE IF NOT EXISTS allowlist (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern    TEXT NOT NULL UNIQUE,
@@ -154,6 +172,8 @@ CREATE INDEX IF NOT EXISTS idx_findings_rule_state ON findings(status, rule_id);
 CREATE INDEX IF NOT EXISTS idx_scans_target      ON scans(target_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_events_ts         ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_assets_target     ON assets(target_id);
+CREATE INDEX IF NOT EXISTS idx_versions_asset    ON asset_versions(asset_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_versions_target   ON asset_versions(target_id, id DESC);
 -- 调度器按"启用 + 到期时间"取站点, 站点上千时这个索引决定 tick 的开销
 CREATE INDEX IF NOT EXISTS idx_targets_due       ON targets(enabled, next_scan_at);
 """

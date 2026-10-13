@@ -146,3 +146,33 @@ def test_deleted_finding_is_redetected_on_next_scan(prepared) -> None:
     again = db.query_one("SELECT COUNT(*) c FROM findings WHERE rule_id='database-url'")["c"]
     assert again == 1, "删掉的 redis 连接串应在下一轮扫描里重新命中"
     assert result.assets_skipped < result.assets_fetched, "被标记的资产不应再走跳过分支"
+
+
+def test_scan_records_asset_versions_without_storing_source(prepared) -> None:
+    """扫描要给每个变化的资产留一版字符串签名, 且签名里不能出现明文密钥。"""
+    import asyncio
+    import json
+
+    from app.scanner import scan_target
+
+    target, db = prepared
+    db.execute("DELETE FROM asset_versions")
+    db.execute("UPDATE assets SET recheck=1 WHERE target_id=?", (target["id"],))
+    result = asyncio.run(scan_target(target))
+
+    assert result.assets_changed > 0, "内容变化的资产应被记一版"
+    rows = db.query("SELECT url, strings, added FROM asset_versions")
+    assert len(rows) >= 8, "样例站点 9 个资产都应留档"
+    app_js = next(row for row in rows if row["url"].endswith("/js/app.js"))
+    signature = json.loads(app_js["strings"])
+    assert any("js" in item for item in signature), "普通字符串要留在签名里, 否则看不出改了什么"
+    # 以密钥前缀开头的条目必须是掩码形态（首尾各留几字符 + (len=...)）
+    leaked = [item for item in signature
+              if item.startswith(("AKIA", "LTAI", "ghp_", "sk_l", "AKID")) and "..." not in item]
+    assert leaked == [], f"明文密钥不能进签名: {leaked}"
+    assert any("(len=" in item for item in signature), "命中的密钥应以掩码形态留档"
+
+    # 增量扫描（内容未变）不应再产生新版本
+    before = db.query_one("SELECT COUNT(*) c FROM asset_versions")["c"]
+    asyncio.run(scan_target(target))
+    assert db.query_one("SELECT COUNT(*) c FROM asset_versions")["c"] == before
