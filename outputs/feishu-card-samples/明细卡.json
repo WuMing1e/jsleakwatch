@@ -1,0 +1,94 @@
+{
+ "config": {
+  "wide_screen_mode": true
+ },
+ "header": {
+  "template": "yellow",
+  "title": {
+   "tag": "plain_text",
+   "content": "发现硬编码凭证 · 本地样例站"
+  }
+ },
+ "elements": [
+  {
+   "tag": "div",
+   "fields": [
+    {
+     "is_short": true,
+     "text": {
+      "tag": "lark_md",
+      "content": "**等级**\n<font color='blue'>中危</font>"
+     }
+    },
+    {
+     "is_short": true,
+     "text": {
+      "tag": "lark_md",
+      "content": "**AI 复核**\n待人工确认"
+     }
+    },
+    {
+     "is_short": true,
+     "text": {
+      "tag": "lark_md",
+      "content": "**站点**\n[本地样例站](http://127.0.0.1:8899/)"
+     }
+    },
+    {
+     "is_short": true,
+     "text": {
+      "tag": "lark_md",
+      "content": "**规则**\n[jscanner2] secret:other"
+     }
+    }
+   ]
+  },
+  {
+   "tag": "div",
+   "text": {
+    "tag": "lark_md",
+    "content": "**命中值**\n`d41f...8a35(len=32)`"
+   }
+  },
+  {
+   "tag": "div",
+   "text": {
+    "tag": "lark_md",
+    "content": "**来源文件**\n[http://127.0.0.1:8899/js/app.js](http://127.0.0.1:8899/js/app.js)"
+   }
+  },
+  {
+   "tag": "div",
+   "text": {
+    "tag": "lark_md",
+    "content": "**命中上下文**\n```\nfunction(w, d) {\n  \"use strict\";\n  var config = {\n    apiBase: \"https://api.demo-shop.example.com\",\n    aliyunAccessKeyId: \"LTAI5tBkQ9mZx2VnPr7YqW3F\",\n    aliyunAccessKeySecret: \"kR8mQp2XvB7nZt4Wy6Ls1Dg9Hc3Jf\",\n    tencentSecretId: \"AKIDz8krbsJ5yKBZQpn74WFkmLPx3gnPhESA\",\n    goog\n```"
+   }
+  },
+  {
+   "tag": "hr"
+  },
+  {
+   "tag": "action",
+   "actions": [
+    {
+     "tag": "button",
+     "text": {
+      "tag": "plain_text",
+      "content": "在控制台查看详情"
+     },
+     "url": "http://127.0.0.1:8787/#/findings?finding=1168",
+     "type": "primary"
+    }
+   ]
+  },
+  {
+   "tag": "note",
+   "elements": [
+    {
+     "tag": "lark_md",
+     "content": "JSLeakWatch · 2026-10-13 20:48 · 规则 `jscanner2:secret:other`"
+    }
+   ]
+  }
+ ]
+}

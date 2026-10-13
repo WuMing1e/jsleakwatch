@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# 运行数据: 里面有 AI API Key、飞书 Webhook、真实发现与 AI 缓存, 绝不入库
+data/
+work/data/
+*.db
+*.db-wal
+*.db-shm
+
+# 第三方工具副本(264MB, 按 tools/external/NOTES.md 重新获取), 只保留说明
+tools/external/*
+!tools/external/NOTES.md
+
+# 截图里带着真实站点、掩码值与 Webhook 地址
+outputs/screenshots/
+
+# 针对具体目标的评估报告(可随时用 tools/coverage.py 重新生成, 不带上云)
+outputs/reports/
+
+# 临时文件
+work/*.log
+*.log
+.DS_Store

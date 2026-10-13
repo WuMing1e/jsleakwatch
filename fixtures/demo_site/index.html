@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Demo Shop</title>
+  <script>
+    // 构建期被内联进来的运行时配置 (真实站点里这类配置最容易泄露)
+    window.__RUNTIME_CONFIG__ = {
+      "VITE_APP_API_KEY": "8f3a91c2d4e5b6a7c8d9e0f1a2b3c4d5",
+      "amapKey": "b7e4a91c25df3846a0c7e2915bf3d807",
+      "endpoint": "/api/v2",
+      "debug": false
+    };
+  </script>
+  <script src="/js/vendor.js"></script>
+  <script src="/js/app.js" defer></script>
+</head>
+<body>
+  <h1>Demo Shop</h1>
+  <p>用于验证 JSLeakWatch 采集与检测链路的本地样例站点。</p>
+  <a href="/about.html">关于</a>
+</body>
+</html>

@@ -1,0 +1,57 @@
+{
+ "config": {
+  "wide_screen_mode": true
+ },
+ "header": {
+  "template": "orange",
+  "title": {
+   "tag": "plain_text",
+   "content": "JS 硬编码泄露巡检汇总 · 3 条新发现"
+  }
+ },
+ "elements": [
+  {
+   "tag": "div",
+   "text": {
+    "tag": "lark_md",
+    "content": "本轮巡检命中 **3** 条疑似硬编码凭证, 分布在 1 个站点\n<font color='orange'>高危</font> 1 · <font color='blue'>中危</font> 2"
+   }
+  },
+  {
+   "tag": "hr"
+  },
+  {
+   "tag": "div",
+   "text": {
+    "tag": "lark_md",
+    "content": "**[本地样例站](http://127.0.0.1:8787/#/findings?target=1)** <font color='grey'>3 条</font>\n- <font color='blue'>中危</font> [jscanner2] secret:other · `d41f...8a35(len=32)` · <font color='grey'>AI 待人工确认</font>\n  <font color='grey'>[http://127.0.0.1:8899/js/app.js](http://127.0.0.1:8899/js/app.js)</font>\n- <font color='orange'>高危</font> [jscanner2] secret:api_key · `LTAI...qW3F(len=24)` · <font color='grey'>AI 真凭证 66%</font>\n  <font color='grey'>[http://127.0.0.1:8899/js/app.js](http://127.0.0.1:8899/js/app.js)</font>\n- <font color='blue'>中危</font> [jscanner2] secret:other · `3f8c...6c04(len=32)` · <font color='grey'>AI 真凭证 60%</font>\n  <font color='grey'>[http://127.0.0.1:8899/js/app.js](http://127.0.0.1:8899/js/app.js)</font>"
+   }
+  },
+  {
+   "tag": "hr"
+  },
+  {
+   "tag": "action",
+   "actions": [
+    {
+     "tag": "button",
+     "text": {
+      "tag": "plain_text",
+      "content": "查看全部发现"
+     },
+     "url": "http://127.0.0.1:8787/#/findings",
+     "type": "primary"
+    }
+   ]
+  },
+  {
+   "tag": "note",
+   "elements": [
+    {
+     "tag": "lark_md",
+     "content": "JSLeakWatch · 2026-10-13 20:48 · 已按 AI 复核过滤误报"
+    }
+   ]
+  }
+ ]
+}

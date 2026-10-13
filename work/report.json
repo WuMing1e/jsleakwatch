@@ -1,0 +1,69 @@
+{
+  "corpus": {
+    "name": "demo",
+    "assets": 9,
+    "target_url": "http://127.0.0.1:8899/",
+    "created_at": "2026-10-11T10:49:44+00:00"
+  },
+  "created_at": "2026-10-11T10:49:58+00:00",
+  "labels": {
+    "total": 21,
+    "tp": 19,
+    "fp": 2,
+    "unlabeled": 0
+  },
+  "analyzers": [
+    {
+      "name": "builtin",
+      "available": true,
+      "hits": 22,
+      "tp": 20,
+      "fp": 2,
+      "unlabeled": 0,
+      "missed": 1,
+      "unique": 18,
+      "runtime_ms": 2,
+      "error": "",
+      "by_severity": {
+        "medium": 7,
+        "info": 1,
+        "high": 5,
+        "critical": 8,
+        "low": 1
+      },
+      "precision": 0.9091,
+      "recall": 0.9524,
+      "f1": 0.9302,
+      "exclusive_hits": 20
+    },
+    {
+      "name": "cli:jshawk",
+      "available": false,
+      "hits": 0,
+      "tp": 0,
+      "fp": 0,
+      "unlabeled": 0,
+      "missed": 0,
+      "unique": 0,
+      "runtime_ms": 0,
+      "error": "工具不可用（未安装或命令缺失）",
+      "by_severity": {},
+      "precision": null,
+      "recall": null,
+      "f1": null,
+      "exclusive_hits": 0
+    }
+  ],
+  "missed": [
+    {
+      "asset": "http://127.0.0.1:8899/js/vendor.js",
+      "note": "PostHog 项目密钥 (两套规则都未覆盖)",
+      "severity": "medium",
+      "found_by": [],
+      "missed_by": [
+        "builtin"
+      ]
+    }
+  ],
+  "notes": []
+}

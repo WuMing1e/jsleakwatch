@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JSLeakWatch · JS 硬编码泄露监测</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/styles.css?v=__ASSET_V__">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-text">
+        <b>JSLeakWatch</b>
+        <small>硬编码泄露监测</small>
+      </span>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="sidebar-foot">
+      <div class="status-line" id="sched-status">
+        <span class="dot dot-idle"></span><span>调度器初始化中</span>
+      </div>
+      <div class="status-line muted" id="alert-status">告警通道未启用</div>
+      <div class="status-line muted" id="build-info">v1.0.0</div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="topbar-title">
+        <h1 id="page-title">概览</h1>
+        <p id="page-sub" class="muted"></p>
+      </div>
+      <div class="topbar-actions" id="page-actions"></div>
+    </header>
+    <main class="view" id="view"></main>
+  </div>
+</div>
+
+<div class="drawer-scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden></aside>
+<div class="modal-scrim" id="modal-scrim" hidden>
+  <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<script src="/static/app.js?v=__ASSET_V__"></script>
+</body>
+</html>

@@ -1,0 +1,139 @@
+"""HTTP 抓取层: 连接复用、超时、同域礼貌限速、大小截断。"""
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import dataclass
+from urllib.parse import urlparse
+
+import httpx
+
+from .config import ScanConfig
+
+
+@dataclass
+class FetchResult:
+    url: str
+    final_url: str
+    status: int
+    content_type: str
+    text: str
+    size: int
+    truncated: bool = False
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == 200 and not self.error
+
+
+def looks_binary(data: bytes) -> bool:
+    sample = data[:2048]
+    if b"\x00" in sample:
+        return True
+    if not sample:
+        return False
+    printable = sum(1 for b in sample if 9 <= b <= 13 or 32 <= b <= 126 or b > 127)
+    return printable / len(sample) < 0.80
+
+
+class Fetcher:
+    """带全局并发限制与按域限速的异步抓取器。"""
+
+    def __init__(self, cfg: ScanConfig, max_concurrency: int | None = None) -> None:
+        self.cfg = cfg
+        limit = max_concurrency or cfg.max_concurrency
+        self._sem = asyncio.Semaphore(max(1, limit))
+        self._host_locks: dict[str, asyncio.Lock] = {}
+        self._host_last: dict[str, float] = {}
+        self._client: httpx.AsyncClient | None = None
+        self.bytes_fetched = 0
+        self.requests_made = 0
+
+    async def __aenter__(self) -> "Fetcher":
+        headers = self.headers()
+        kwargs: dict = {
+            "headers": headers,
+            "timeout": httpx.Timeout(self.cfg.timeout_seconds),
+            "follow_redirects": True,
+            "verify": self.cfg.verify_tls,
+            "limits": httpx.Limits(max_connections=max(4, self.cfg.max_concurrency * 2)),
+        }
+        if self.cfg.proxy:
+            kwargs["proxy"] = self.cfg.proxy
+        self._client = httpx.AsyncClient(**kwargs)
+        return self
+
+    def headers(self) -> dict[str, str]:
+        """默认头 + 用户自定义头（后者覆盖前者），用于带凭据采集。"""
+        merged: dict[str, str] = {
+            "User-Agent": self.cfg.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        for key, value in (self.cfg.extra_headers or {}).items():
+            if key and value:
+                merged[str(key)] = str(value)
+        if self.cfg.cookies:
+            merged["Cookie"] = self.cfg.cookies
+        return merged
+
+    async def __aexit__(self, *exc: object) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    def _host_lock(self, host: str) -> asyncio.Lock:
+        lock = self._host_locks.get(host)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._host_locks[host] = lock
+        return lock
+
+    async def _throttle(self, host: str) -> None:
+        delay = max(0, self.cfg.per_host_delay_ms) / 1000.0
+        if delay <= 0:
+            return
+        async with self._host_lock(host):
+            last = self._host_last.get(host, 0.0)
+            wait = delay - (time.monotonic() - last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._host_last[host] = time.monotonic()
+
+    async def get(self, url: str, allow_any_type: bool = False) -> FetchResult:
+        assert self._client is not None, "Fetcher 需在 async with 中使用"
+        host = urlparse(url).netloc.lower()
+        async with self._sem:
+            await self._throttle(host)
+            try:
+                resp = await self._client.get(url)
+            except Exception as exc:  # noqa: BLE001 - 单资产失败不应中断整轮扫描
+                return FetchResult(url, url, 0, "", "", 0, error=f"{type(exc).__name__}: {exc}"[:200])
+            self.requests_made += 1
+            ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+            body = resp.content
+            truncated = False
+            if len(body) > self.cfg.max_asset_bytes:
+                body = body[: self.cfg.max_asset_bytes]
+                truncated = True
+
+            if not allow_any_type and looks_binary(body):
+                return FetchResult(url, str(resp.url), resp.status_code, ctype, "", len(resp.content),
+                                   truncated=truncated, error="binary")
+
+            charset = resp.encoding or "utf-8"
+            try:
+                text = body.decode(charset, errors="replace")
+            except (LookupError, UnicodeDecodeError):
+                text = body.decode("utf-8", errors="replace")
+            self.bytes_fetched += len(body)
+            return FetchResult(
+                url=url,
+                final_url=str(resp.url),
+                status=resp.status_code,
+                content_type=ctype,
+                text=text,
+                size=len(resp.content),
+                truncated=truncated,
+            )
