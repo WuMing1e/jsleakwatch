@@ -1,0 +1,12 @@
+{
+  "env": "production",
+  "endpoint": "/api/v2",
+  "features": { "newCheckout": true, "chat": false },
+  "integrations": {
+    "mapProvider": "amap",
+    "mapKey": "9c1b4f7ae2d34c8f9a0b1c2d3e4f5a6b",
+    "analyticsWriteKey": "wkey_3f9a71c48d2b4e6f8a0c1d2e3f4a5b6c",
+    "featureFlagToken": "fft_live_7d2c9b4a1e6f3a8c5d0b7e9f2a4c6d8e",
+    "legacyUploadKey": "AKIA3F9D2B7C4E6A8D0F"
+  }
+}

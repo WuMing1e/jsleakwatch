@@ -43,6 +43,21 @@ JS_JS_HASH_MAP_RE = re.compile(
 MODULE_SPECIFIER_RE = re.compile(r"^(?:\./|\.\./)")
 JS_IMPORT_SCRIPTS_RE = re.compile(r"""importScripts\s*\(\s*["'`]([^"'`]+)["'`]""", re.I)
 
+# 接口地址: fetch("...") / axios.get("...") / $.post("...") / XHR.open("GET", "...")
+# 现代前端把配置和密钥放在接口响应里, 只看 JS 文件会漏掉这一层。
+API_FETCH_RE = re.compile(r"""\bfetch\s*\(\s*["'`]([^"'`\s]{2,300})["'`]""", re.I)
+API_AXIOS_RE = re.compile(
+    r"""\b(?:axios|http|request|api|client|httpClient)\s*\.\s*(?:get|head)\s*\(\s*["'`]([^"'`\s]{2,300})["'`]""",
+    re.I)
+API_JQUERY_RE = re.compile(
+    r"""\$\.(?:get|getJSON|ajax)\s*\(\s*["'`]([^"'`\s]{2,300})["'`]""", re.I)
+API_XHR_RE = re.compile(
+    r"""\.open\s*\(\s*["'`]GET["'`]\s*,\s*["'`]([^"'`\s]{2,300})["'`]""",
+    re.I)
+API_METHOD_RE = re.compile(r"""\bmethod\s*:\s*["'`](POST|PUT|PATCH|DELETE)["'`]""", re.I)
+API_URL_FIELD_RE = re.compile(
+    r"""\burl\s*:\s*["'`]([^"'`\s]{2,300})["'`]""", re.I)
+
 SCRIPT_EXT = (".js", ".mjs", ".cjs")
 STATIC_HINT = re.compile(r"(static|assets|_next|chunks|dist|build|js|bundle)", re.I)
 NON_PAGE_EXT = re.compile(
@@ -53,6 +68,11 @@ COMMON_CONFIG_PATHS = (
     "/config.json", "/settings.js", "/static/config.js", "/assets/config.js",
     "/js/config.js", "/global.js", "/env-config.js", "/appsettings.json",
 )
+
+# 接口响应的常见形态: 去重后按上限抓取
+API_EXT_OK = (".json", ".xml", ".txt", ".yaml", ".yml", ".csv")
+API_EXT_SKIP = re.compile(
+    r"\.(js|mjs|cjs|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|mp4|webm|pdf|zip|gz)$", re.I)
 
 
 @dataclass
@@ -81,6 +101,8 @@ class Extractor:
     scope: str = "same-origin"
     follow_sourcemaps: bool = True
     max_synth_chunks: int = 200
+    scan_api: bool = False          # 是否顺带采集接口响应（默认关，属于额外请求）
+    max_api: int = 30               # 单个站点最多抓几个接口
     stats: dict[str, int] = field(default_factory=dict)
 
     def _keep(self, url: str) -> bool:
@@ -210,7 +232,55 @@ class Extractor:
                 if ref.startswith("data:"):
                     continue
                 self._add(out, urljoin(asset_url, ref.strip()), "map", depth)
+        if self.scan_api:
+            self._add_api(out, asset_url, text, depth)
         return list(out.values())
+
+    def _add_api(self, out: dict[str, Candidate], asset_url: str, text: str, depth: int) -> None:
+        """从 JS 里挑出接口地址。
+
+        三条自我约束: 只收静态字面量（带 ${} / {{}} 的模板串跳过, 不猜参数）; 只收
+        "应用自己就是 GET 读"的地址（POST/PUT/DELETE 一律不要, 免得 GET 到写接口）;
+        只 GET 同源地址。所以这里不会构造出站点没打算暴露的请求。
+        """
+        if not self.scan_api or self.max_api <= 0:
+            return
+        found: list[str] = []
+        for match in API_FETCH_RE.finditer(text):
+            # fetch(url, {method: "POST"}) 这类虽然字面量是地址, 但语义是写操作, 跳过。
+            # 只看这次调用自己的参数（截到第一个右括号）, 否则会把下一个 fetch 的 method 算进来
+            tail = text[match.end():match.end() + 200].split(")", 1)[0]
+            if API_METHOD_RE.search(tail):
+                continue
+            found.append(match.group(1))
+        for pattern in (API_AXIOS_RE, API_JQUERY_RE, API_XHR_RE, API_URL_FIELD_RE):
+            found.extend(pattern.findall(text))
+        picked = 0
+        for raw in found:
+            ref = raw.strip()
+            if not ref or any(token in ref for token in ("${", "{{", "}}", "://{", "?" + "{")):
+                continue
+            if ref.startswith(("data:", "blob:", "javascript:", "#")):
+                continue
+            if any(ch in ref for ch in (" ", "\n", "\t", "\\")):
+                continue
+            full = urljoin(asset_url, ref)
+            path = urlparse(full).path
+            if not path or path == "/":
+                continue
+            if API_EXT_SKIP.search(path) and not path.lower().endswith(API_EXT_OK):
+                continue
+            if "?" in full and "=" in full.split("?", 1)[1] and not API_EXT_OK and \
+                    path.count(".") == 0 and not path.startswith("/api"):
+                continue        # 带查询串的动态地址容易构造出无用请求, 只放行明显像接口的
+            before = len(out)
+            self._add(out, full, "api", depth, "接口响应")
+            if len(out) > before:
+                picked += 1
+            if picked >= self.max_api:
+                break
+        if picked:
+            self.stats["api_endpoints"] = self.stats.get("api_endpoints", 0) + picked
 
     @staticmethod
     def _string_maps(text: str, limit: int = 12) -> list[dict[str, str]]:

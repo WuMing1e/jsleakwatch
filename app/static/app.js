@@ -1236,7 +1236,8 @@ function diffLines(change) {
 }
 
 function assetKind(kind) {
-  return { html: '页面', script: '脚本', inline: '内联', map: '映射', config: '配置' }[kind] || kind;
+  return { html: '页面', script: '脚本', inline: '内联', map: '映射', config: '配置',
+           api: '接口' }[kind] || kind;
 }
 
 /* 单个资产的内容版本历史: 每版列出新增与消失的字符串 */
@@ -1656,6 +1657,13 @@ async function renderSettings() {
             <label class="switch"><input type="checkbox" id="s-cross" ${scan.allow_cross_origin_js ? 'checked' : ''}><span class="track"></span>允许采集跨域脚本</label>
             <label class="switch"><input type="checkbox" id="s-tls" ${scan.verify_tls ? 'checked' : ''}><span class="track"></span>校验 TLS 证书</label>
             <label class="switch"><input type="checkbox" id="s-raw" ${scan.store_raw_secrets ? 'checked' : ''}><span class="track"></span>入库保存明文命中值 (默认关闭)</label>
+            <label class="switch"><input type="checkbox" id="s-api" ${scan.scan_api_endpoints ? 'checked' : ''}><span class="track"></span>扫描接口响应 (只 GET 同源读接口)</label>
+          </div>
+          <div class="form-row">
+            <label class="field">单站接口上限 (条)
+              <input type="number" id="s-apimax" min="0" max="200" value="${esc(scan.max_api_endpoints || 20)}">
+              <span class="field-hint">只收 JS 里以 GET 语义出现的同源地址；带变量的模板地址一律跳过，不猜参数。</span>
+            </label>
           </div>
           <div style="display:flex;gap:8px">
             <button class="btn btn-primary btn-sm" data-act="save-scan">保存采集参数</button>
@@ -1995,6 +2003,8 @@ async function saveScanSettings() {
       allow_cross_origin_js: $('#s-cross').checked,
       verify_tls: $('#s-tls').checked,
       store_raw_secrets: $('#s-raw').checked,
+      scan_api_endpoints: $('#s-api').checked,
+      max_api_endpoints: Number($('#s-apimax').value || 20),
     },
     discovery: {
       backend: $('#s-discovery').value,

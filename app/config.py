@@ -46,6 +46,8 @@ class ScanConfig:
     proxy: str = ""                    # 例如 http://127.0.0.1:8080
     probe_common_config: bool = True   # 探测 /config.js /env.js 等常见配置入口
     store_raw_secrets: bool = False    # 默认只存掩码值, 不落库明文
+    scan_api_endpoints: bool = False   # 顺带 GET 同源接口响应并扫描（默认关, 属于额外请求）
+    max_api_endpoints: int = 20        # 单站最多抓几个接口
     # 带凭据采集（仅用于已授权目标）：额外请求头与 Cookie，
     # 用来覆盖"登录后才下发"的 JS；留空即匿名采集。
     extra_headers: dict[str, str] = field(default_factory=dict)

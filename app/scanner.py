@@ -70,6 +70,8 @@ def scan_config_from_settings(overrides: dict[str, Any] | None = None) -> ScanCo
         verify_tls=SETTINGS.scan.verify_tls,
         probe_common_config=SETTINGS.scan.probe_common_config,
         store_raw_secrets=SETTINGS.scan.store_raw_secrets,
+        scan_api_endpoints=SETTINGS.scan.scan_api_endpoints,
+        max_api_endpoints=SETTINGS.scan.max_api_endpoints,
     )
     stored = db.get_setting("scan") or {}
     for key, value in stored.items():
@@ -136,6 +138,8 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
         base_url=target["base_url"],
         scope=target.get("scope") or "same-origin",
         follow_sourcemaps=bool(target.get("include_sourcemaps", 1)) and cfg.follow_sourcemaps,
+        scan_api=bool(cfg.scan_api_endpoints),
+        max_api=max(0, int(cfg.max_api_endpoints or 0)),
     )
 
     seen_keys: set[str] = set()          # 本轮出现过的 fingerprint
@@ -234,13 +238,15 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                             db.execute("UPDATE assets SET recheck=0 WHERE id=?", (asset_id,))
                         asset_dets = _detect(detector, resp.text, target_id, cand.url,
                                              cfg.store_raw_secrets)
-                        recorded = asset_history.record_version(
-                            target_id, asset_id, cand.url, resp.text, sha,
-                            secret_hashes=[det.sha256 for det in asset_dets],
-                            findings=len(asset_dets),
-                        )
-                        if recorded.get("changed"):
-                            result.assets_changed += 1
+                        # 接口响应常带时间戳/随机串, 每轮都不一样, 记版本只会把变更流刷满
+                        if cand.kind != "api":
+                            recorded = asset_history.record_version(
+                                target_id, asset_id, cand.url, resp.text, sha,
+                                secret_hashes=[det.sha256 for det in asset_dets],
+                                findings=len(asset_dets),
+                            )
+                            if recorded.get("changed"):
+                                result.assets_changed += 1
                         for det in asset_dets:
                             detections.append((cand.url, cand.kind, det))
                         if (external_analyzers
@@ -262,7 +268,8 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                         if cand.depth < max_depth:
                             for page in extractor.pages_from_html(cand.url, resp.text, cand.depth + 1):
                                 next_batch.setdefault(page.url, page)
-                    else:
+                    elif cand.kind != "api":
+                        # 接口响应只扫内容, 不再从里面展开引用（JSON 里的 .js 多半是数据不是引用）
                         for child in extractor.from_js(cand.url, resp.text, cand.depth):
                             next_batch.setdefault(child.url, child)
 

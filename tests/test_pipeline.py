@@ -176,3 +176,33 @@ def test_scan_records_asset_versions_without_storing_source(prepared) -> None:
     before = db.query_one("SELECT COUNT(*) c FROM asset_versions")["c"]
     asyncio.run(scan_target(target))
     assert db.query_one("SELECT COUNT(*) c FROM asset_versions")["c"] == before
+
+
+def test_api_endpoint_responses_are_scanned(prepared) -> None:
+    """打开接口采集后: JS 里的 GET 接口会被抓回来, 响应体里的密钥同样能命中。"""
+    import asyncio
+
+    from app.scanner import scan_config_from_settings, scan_target
+
+    target, db = prepared
+    db.set_setting("scan", {**(db.get_setting("scan") or {}),
+                            "scan_api_endpoints": True, "max_api_endpoints": 10})
+    assert scan_config_from_settings().scan_api_endpoints is True
+    try:
+        result = asyncio.run(scan_target(target))
+        assert result.status == "ok"
+        urls = {row["url"] for row in db.query("SELECT url FROM assets WHERE kind='api'")}
+        assert any(url.endswith("/api/runtime-config.json") for url in urls), \
+            f"接口地址应被发现并抓取, 实际: {urls}"
+        hits = db.query(
+            "SELECT rule_id, match_masked FROM findings WHERE asset_url LIKE '%api/runtime-config.json'"
+        )
+        assert any(row["rule_id"] == "aws-access-key-id" for row in hits), \
+            f"接口响应里的密钥应被命中, 实际: {[r['rule_id'] for r in hits]}"
+        # 接口资产不进变更流（响应常带时间戳, 记版本会刷屏）
+        assert db.query_one(
+            "SELECT COUNT(*) c FROM asset_versions WHERE url LIKE '%api/runtime-config.json'"
+        )["c"] == 0
+    finally:
+        db.set_setting("scan", {**(db.get_setting("scan") or {}),
+                                "scan_api_endpoints": False})

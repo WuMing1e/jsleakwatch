@@ -36,5 +36,8 @@
 
   w.DemoApp = { boot: boot, config: config, debug: debug };
   d.addEventListener("DOMContentLoaded", boot);
+
+  // 运行时配置由后端接口下发, 前端只拿公开 key
+  fetch("/api/runtime-config.json").then(function (resp) { return resp.json(); });
 })(window, document);
 //# sourceMappingURL=app.js.map

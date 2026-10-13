@@ -120,3 +120,52 @@ def test_config_probe_candidates() -> None:
     urls = {c.url for c in config_probe_candidates(BASE)}
     assert "https://shop.example.com/config.js" in urls
     assert "https://shop.example.com/env.js" in urls
+
+
+def api_urls(js: str, **kwargs) -> set[str]:
+    ex = Extractor(base_url=BASE, scope="same-origin", scan_api=True, **kwargs)
+    out: dict = {}
+    ex._add_api(out, f"{BASE}js/app.js", js, 1)
+    return {cand.url for cand in out.values()}
+
+
+def test_api_endpoints_only_read_calls() -> None:
+    js = """
+    fetch("/api/v1/config");
+    fetch("/api/v1/write", { method: "POST", body: payload });
+    axios.get("/api/user/profile");
+    axios.post("/api/v1/notify", payload);
+    $.getJSON("/api/v1/list");
+    $.post("/api/v1/create");
+    xhr.open("GET", "/api/v1/orders?page=1");
+    xhr.open("POST", "/api/v1/remove");
+    """
+    urls = api_urls(js)
+    assert urls == {
+        "https://shop.example.com/api/v1/config",
+        "https://shop.example.com/api/user/profile",
+        "https://shop.example.com/api/v1/list",
+        "https://shop.example.com/api/v1/orders?page=1",
+    }, "只收应用自己就是 GET 读的地址, 写接口一律不要"
+
+
+def test_api_endpoints_skip_templates_and_static() -> None:
+    js = """
+    fetch(`/api/tpl/${id}/detail`);
+    fetch("/static/logo.png");
+    fetch("/js/main.js");
+    fetch("https://cdn.other.com/api/x");
+    const cfg = { url: "/internal/settings.json" };
+    """
+    urls = api_urls(js)
+    assert urls == {"https://shop.example.com/internal/settings.json"}, \
+        "模板地址、静态资源、跨域地址都要跳过"
+
+
+def test_api_endpoints_respect_cap_and_toggle() -> None:
+    js = "\n".join(f'fetch("/api/v1/item{i}");' for i in range(10))
+    assert len(api_urls(js, max_api=3)) == 3, "单站接口上限要生效"
+    off = Extractor(base_url=BASE, scope="same-origin")
+    out: dict = {}
+    off._add_api(out, f"{BASE}js/app.js", js, 1)
+    assert out == {}, "开关关闭时不采集任何接口"
