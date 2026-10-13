@@ -421,6 +421,84 @@ RULE_INDEX: dict[str, Rule] = {r.id: r for r in RULES}
 MAX_SCAN_BYTES = 8_000_000
 
 
+def explain_rule(rule: Rule, text: str, allowlist: Iterable[str] = (), limit: int = 20) -> dict:
+    """给规则编辑器用: 跑一遍这条规则, 说明"匹配到几处、被哪些过滤器挡掉多少"。
+
+    过滤顺序与 Detector.scan_text 保持一致, 只是这里把每一步的拦截数记下来 ——
+    否则用户写了个能匹配的正则却看到 0 结果, 会以为是规则没生效。
+    """
+    import re as _re
+
+    try:
+        pattern = _re.compile(rule.pattern, _re.MULTILINE)
+    except _re.error as exc:
+        raise ValueError(f"正则无法编译: {exc}") from exc
+
+    allowed = []
+    for item in allowlist:
+        try:
+            allowed.append(_re.compile(item, _re.I))
+        except _re.error:
+            continue
+
+    rejected: dict[str, int] = {}
+    kept: list[Detection] = []
+
+    def reject(reason: str) -> None:
+        rejected[reason] = rejected.get(reason, 0) + 1
+
+    raw_count = 0
+    for match in pattern.finditer(text or ""):
+        raw_count += 1
+        if rule.secret_group and match.lastindex and match.lastindex >= rule.secret_group:
+            raw, start = match.group(rule.secret_group), match.start(rule.secret_group)
+        else:
+            raw, start = match.group(0), match.start(0)
+        if raw is None:
+            reject("空匹配")
+            continue
+        raw = raw.strip()
+        if rule.min_length and len(raw) < rule.min_length:
+            reject("短于 min_length")
+            continue
+        if len(raw) > 400:
+            reject("超过 400 字符")
+            continue
+        if looks_placeholder(raw):
+            reject("占位符过滤")
+            continue
+        if looks_like_code_path(raw):
+            reject("代码路径过滤")
+            continue
+        if rule.keywords:
+            window = text[max(0, start - rule.window):start + rule.window].lower()
+            if not any(k.lower() in window for k in rule.keywords):
+                reject("关键词不在窗口内")
+                continue
+        entropy = shannon_entropy(raw)
+        if rule.entropy_min and entropy < rule.entropy_min:
+            reject(f"熵值低于 {rule.entropy_min}")
+            continue
+        if any(item.search(raw) for item in allowed) or any(item.search(raw) for item in rule.allowlist):
+            reject("命中白名单")
+            continue
+        masked = mask_value(raw)
+        kept.append(Detection(
+            rule_id=rule.id, rule_name=rule.name, severity=rule.severity, category=rule.category,
+            raw=raw[:160], masked=masked, sha256=hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest(),
+            entropy=round(entropy, 2), line_no=text.count("\n", 0, start) + 1,
+            context=(text[max(0, start - 60):start + len(raw) + 60] or "").replace("\n", " ")[:200],
+            fingerprint="", start=start, end=start + len(raw),
+        ))
+    return {
+        "raw_count": raw_count,
+        "count": len(kept),
+        "matches": kept[:limit],
+        "rejected": rejected,
+        "rule_id": rule.id,
+    }
+
+
 class Detector:
     """把规则表编译成可复用的扫描器。"""
 

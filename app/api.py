@@ -5,6 +5,7 @@ import asyncio
 import csv
 import io
 import json
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -22,7 +23,7 @@ from .importers.gitleaks import parse_toml, rule_to_dict
 from .analyzers import analyzer_specs
 from .target_scanners import target_scanner_specs
 from .notify import FeishuNotifier, alert_config
-from .rules import RULES, SEVERITY_ORDER
+from .rules import RULES, SEVERITY_ORDER, explain_rule
 from .scanner import (
     bump_rules_revision,
     mark_assets_for_recheck,
@@ -154,6 +155,31 @@ class RuleImportIn(BaseModel):
     toml: str = ""
     path: str = ""
     deactivate: bool = False
+
+
+class RuleDraftIn(BaseModel):
+    id: str = ""
+    name: str = ""
+    pattern: str
+    severity: str = "high"
+    category: str = "imported"
+    description: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    entropy_min: float = 0.0
+    secret_group: int = 0
+    reference: str = ""
+
+
+class RuleTestIn(BaseModel):
+    pattern: str
+    name: str = ""
+    severity: str = "high"
+    category: str = "imported"
+    secret_group: int = 0
+    keywords: list[str] = Field(default_factory=list)
+    entropy_min: float = 0.0
+    sample: str = ""
+    limit: int = Field(default=20, ge=1, le=100)
 
 
 class AITestIn(BaseModel):
@@ -1025,6 +1051,144 @@ def delete_custom_rule(rule_id: str) -> dict[str, Any]:
     db.set_setting("custom_rules", items)
     bump_rules_revision()
     return {"deleted": rule_id, "total_custom": len(items)}
+
+
+def _rule_from_draft(payload: RuleDraftIn | RuleTestIn, prefix: str = "custom") -> Any:
+    """把编辑器的输入变成一条 Rule。
+
+    id 规则: 没带前缀的补 custom:, 已带前缀(gl: / custom:)的原样保留 —— 否则编辑一条
+    导入进来的规则会变成新建一条, 老的留在那里。
+    """
+    from .importers.gitleaks import rule_from_dict
+
+    raw_id = ((payload.id or payload.name or "rule") if isinstance(payload, RuleDraftIn)
+              else (payload.name or "rule")).strip()
+    if ":" in raw_id:
+        head, _, tail = raw_id.partition(":")
+        rule_id = f"{head}:{_slugify(tail)}"
+    else:
+        rule_id = f"{prefix}:{_slugify(raw_id)}"
+    if any(rule.id == rule_id for rule in RULES):
+        raise HTTPException(400, f"规则 id「{rule_id}」与内置规则重名, 请换一个名字")
+    return rule_from_dict({
+        "id": rule_id,
+        "name": payload.name or rule_id,
+        "severity": payload.severity,
+        "category": payload.category or "imported",
+        "pattern": payload.pattern,
+        "description": getattr(payload, "description", ""),
+        "secret_group": payload.secret_group,
+        "keywords": payload.keywords,
+        "entropy_min": payload.entropy_min,
+        "reference": getattr(payload, "reference", ""),
+        "tags": ["custom"],
+    })
+
+
+def _slugify(value: str) -> str:
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", value.lower()).strip("-") or "rule"
+
+
+@app.post("/api/rules/test")
+def test_rule(payload: RuleTestIn) -> dict[str, Any]:
+    """拿一段样例当场验证正则: 走的是和真实扫描同一套过滤逻辑。"""
+    if not (payload.sample or "").strip():
+        raise HTTPException(400, "请粘贴一段样例文本")
+    if not (payload.pattern or "").strip():
+        raise HTTPException(400, "请填写正则表达式")
+    try:
+        rule = _rule_from_draft(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"规则不合法: {exc}") from exc
+    allowlist = [row["pattern"] for row in db.query("SELECT pattern FROM allowlist")]
+    try:
+        report = explain_rule(rule, payload.sample, allowlist=allowlist, limit=payload.limit)
+    except ValueError as exc:  # 正则写错时给明确报错
+        raise HTTPException(400, str(exc)) from exc
+    report["matches"] = [{
+        "match": item.raw, "masked": item.masked, "line_no": item.line_no,
+        "entropy": item.entropy, "context": item.context,
+    } for item in report["matches"]]
+    if not report["count"] and report["rejected"]:
+        report["hint"] = "正则本身能匹配, 但被内置过滤器挡掉了 —— " \
+                         + "、".join(f"{name} {count} 处" for name, count in report["rejected"].items())
+    elif not report["raw_count"]:
+        report["hint"] = "这段样例里正则一处都没匹配上, 检查一下模式是否太严"
+    return {**report, "rule_id": rule.id}
+
+
+@app.post("/api/rules/custom")
+def save_custom_rule(payload: RuleDraftIn) -> dict[str, Any]:
+    """新建或覆盖一条自定义规则。"""
+    if not (payload.pattern or "").strip():
+        raise HTTPException(400, "请填写正则表达式")
+    rule = _rule_from_draft(payload)
+    from .importers.gitleaks import rule_to_dict
+
+    items = {item["id"]: item for item in (db.get_setting("custom_rules") or [])}
+    items[rule.id] = rule_to_dict(rule)
+    db.set_setting("custom_rules", list(items.values()))
+    bump_rules_revision()
+    db.log_event(f"新增/更新自定义规则 {rule.id}", kind="rules")
+    return {"saved": rule.id, "total_custom": len(items), "revision": rules_revision()}
+
+
+@app.get("/api/rules/quality")
+def rules_quality(min_samples: int = Query(3, ge=1, le=50)) -> dict[str, Any]:
+    """用真实命中的 AI 复核结果给规则打分: 谁在制造误报, 一眼看出来。"""
+    rows = db.query(
+        "SELECT rule_id, rule_name, COUNT(*) hits, COUNT(DISTINCT target_id) sites, "
+        "  SUM(CASE WHEN ai_verdict <> '' THEN 1 ELSE 0 END) judged, "
+        "  SUM(CASE WHEN ai_verdict = 'fake' THEN 1 ELSE 0 END) fake, "
+        "  SUM(CASE WHEN ai_verdict = 'real' THEN 1 ELSE 0 END) real, "
+        "  SUM(CASE WHEN ai_verdict = 'public' THEN 1 ELSE 0 END) public, "
+        "  SUM(CASE WHEN ai_verdict = 'uncertain' THEN 1 ELSE 0 END) uncertain "
+        "  FROM findings GROUP BY rule_id ORDER BY hits DESC"
+    )
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        judged = int(row["judged"] or 0)
+        fake = int(row["fake"] or 0)
+        fp_rate = (fake / judged) if judged else 0.0
+        if judged < min_samples:
+            advice, tone = "样本不足", "muted"
+        elif fp_rate >= 0.8:
+            advice, tone = "建议关闭或加白名单", "err"
+        elif fp_rate >= 0.6:
+            advice, tone = "建议降级 / 交给门控", "warn"
+        elif fp_rate <= 0.2:
+            advice, tone = "信号良好", "ok"
+        else:
+            advice, tone = "继续观察", ""
+        items.append({
+            "rule_id": row["rule_id"], "rule_name": row["rule_name"],
+            "hits": int(row["hits"] or 0), "sites": int(row["sites"] or 0),
+            "judged": judged, "fake": fake, "real": int(row["real"] or 0),
+            "public": int(row["public"] or 0), "uncertain": int(row["uncertain"] or 0),
+            "fp_rate": round(fp_rate, 3), "advice": advice, "tone": tone,
+        })
+    ranked = sorted(
+        [item for item in items if item["judged"] >= min_samples],
+        key=lambda item: (-item["fp_rate"], -item["judged"]),
+    )
+    total_judged = sum(item["judged"] for item in items)
+    total_fake = sum(item["fake"] for item in items)
+    usage = db.query_one("SELECT calls, cached, fails FROM ai_usage WHERE day=?",
+                         (db.utcnow()[:10],))
+    return {
+        "items": items,
+        "ranked": ranked,
+        "summary": {
+            "rules_with_hits": len(items),
+            "judged": total_judged,
+            "fake": total_fake,
+            "fp_rate": round(total_fake / total_judged, 3) if total_judged else 0.0,
+            "min_samples": min_samples,
+            "ai_today": {k: usage[k] for k in usage.keys()} if usage else None,
+        },
+    }
 
 
 # ---------------------------------------------------------------- 设置

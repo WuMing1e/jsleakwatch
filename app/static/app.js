@@ -773,9 +773,13 @@ function targetForm(t) {
     </div>`;
 }
 
-function openTargetModal(t) {
-  $('#modal').innerHTML = targetForm(t);
+function openModal(html) {
+  $('#modal').innerHTML = html;
   $('#modal-scrim').hidden = false;
+}
+
+function openTargetModal(t) {
+  openModal(targetForm(t));
   setTimeout(() => { const el = $('#f-name'); if (el) el.focus(); }, 30);
 }
 
@@ -1285,9 +1289,159 @@ function fmtBytes(n) {
 
 /* ------------------------------------------------------------------ 规则 */
 
+/* 规则质量: 用真实命中 + AI 复核结果算出"谁在制造误报", 并给出可执行建议 */
+function ruleQualityCard(q) {
+  const s = (q && q.summary) || {};
+  const ranked = (q && q.ranked) || [];
+  const worst = ranked.filter((item) => item.tone === 'err' || item.tone === 'warn').slice(0, 6);
+  const ai = s.ai_today || {};
+  const head = s.judged
+    ? `已复核 ${s.judged} 条命中, 其中 ${s.fake} 条被判误报 (${Math.round((s.fp_rate || 0) * 100)}%)`
+    : '还没有 AI 复核结果, 打开 AI 复核后这里会给出每条规则的误报率';
+  return `<section class="card" style="margin-bottom:12px">
+    <div class="card-head"><h2>规则质量</h2><span class="sub">按误报率排序 · 样本 ≥ ${s.min_samples || 3} 条才计入</span></div>
+    <div class="card-body" style="display:flex;flex-direction:column;gap:10px">
+      <div class="field-hint">
+        ${esc(head)}${ai.calls != null ? ` · 今日模型调用 ${ai.calls} 次 (缓存命中 ${ai.cached || 0})` : ''}
+      </div>
+      ${worst.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>规则</th><th class="shrink">命中</th><th class="shrink">站点</th>
+          <th class="shrink">已复核</th><th class="shrink">误报率</th><th class="shrink">建议</th>
+          <th class="shrink">操作</th></tr></thead>
+        <tbody>${worst.map((item) => `
+          <tr>
+            <td><div class="cell-clip w-md" title="${esc(item.rule_id)}">${esc(item.rule_name)}</div></td>
+            <td class="shrink mono muted">${item.hits}</td>
+            <td class="shrink mono muted">${item.sites}</td>
+            <td class="shrink mono muted">${item.judged}</td>
+            <td class="shrink"><span class="tag ${item.tone === 'err' ? 'tag-err' : 'tag-warn'}">${Math.round(item.fp_rate * 100)}%</span></td>
+            <td class="shrink muted" style="font-size:11.5px">${esc(item.advice)}</td>
+            <td class="shrink nowrap">
+              <button class="btn btn-sm" data-act="rule-downgrade" data-id="${esc(item.rule_id)}" title="降一级, 减少噪声">降级</button>
+              <button class="btn btn-sm" data-act="rule-toggle" data-id="${esc(item.rule_id)}" title="关闭这条规则的后续命中">关闭</button>
+            </td>
+          </tr>`).join('')}</tbody>
+      </table></div>` : '<div class="muted" style="font-size:12px">暂无高误报规则 —— 要么样本还不够, 要么规则表现不错。</div>'}
+    </div>
+  </section>`;
+}
+
+/* 在线编辑自定义规则: 正则 + 样例当场验证 */
+function ruleEditor(rule) {
+  const draft = rule || { name: '', pattern: '', severity: 'high', category: 'imported',
+                          description: '', keywords: [], entropy_min: 0 };
+  return `
+    <div class="modal-head">
+      <h2>${rule ? '编辑自定义规则' : '新建检测规则'}</h2>
+      <button class="btn btn-ghost btn-icon btn-sm" data-act="close-modal">${icon('x', 14)}</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label class="field">规则名
+          <input type="text" id="nr-name" value="${esc(draft.name)}" placeholder="例如 Acme 内部令牌">
+        </label>
+        <label class="field">等级
+          <select id="nr-sev">
+            ${Object.keys(SEVERITY).map((k) => `<option value="${k}"${draft.severity === k ? ' selected' : ''}>${SEVERITY[k].label}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      <label class="field">正则表达式
+        <textarea id="nr-pattern" rows="2" placeholder="acme_[A-Za-z0-9]{20,}">${esc(draft.pattern)}</textarea>
+        <span class="field-hint">和真实扫描用同一套过滤（占位符、代码路径、熵值、白名单）。id 会自动加 <code>custom:</code> 前缀。</span>
+      </label>
+      <div class="form-row">
+        <label class="field">关键词 (逗号分隔, 可选)
+          <input type="text" id="nr-keywords" value="${esc((draft.keywords || []).join(','))}" placeholder="acme_,token">
+        </label>
+        <label class="field">熵值下限 (可选)
+          <input type="number" id="nr-entropy" step="0.1" min="0" value="${esc(draft.entropy_min || 0)}">
+        </label>
+      </div>
+      <label class="field">说明
+        <input type="text" id="nr-desc" value="${esc(draft.description || '')}" placeholder="命中什么、为什么危险">
+      </label>
+      <label class="field">样例文本（拿一段真实片段验证）
+        <textarea id="nr-sample" rows="4" placeholder='var k = "acme_a8F3kQ2zLp91XbS7";'></textarea>
+      </label>
+      <div id="nr-result"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-act="close-modal">取消</button>
+      <button class="btn" data-act="test-rule">测试规则</button>
+      <button class="btn btn-primary" data-act="save-rule" data-id="${esc(draft.id || '')}">保存并启用</button>
+    </div>`;
+}
+
+function readRuleDraft() {
+  return {
+    id: $('[data-act="save-rule"]').dataset.id || '',
+    name: $('#nr-name').value.trim(),
+    pattern: $('#nr-pattern').value,
+    severity: $('#nr-sev').value,
+    category: 'imported',
+    description: $('#nr-desc').value.trim(),
+    keywords: $('#nr-keywords').value.split(',').map((s) => s.trim()).filter(Boolean),
+    entropy_min: Number($('#nr-entropy').value || 0),
+  };
+}
+
+async function testRuleDraft() {
+  const draft = readRuleDraft();
+  const sample = $('#nr-sample').value;
+  if (!draft.pattern.trim()) { toast('先填写正则表达式', 'err'); return; }
+  if (!sample.trim()) { toast('粘贴一段样例文本才能验证', 'err'); return; }
+  const box = $('#nr-result');
+  box.innerHTML = '<div class="field-hint">正在验证…</div>';
+  try {
+    const r = await api('/api/rules/test', { method: 'POST', body: JSON.stringify({ ...draft, sample }) });
+    const rejected = Object.entries(r.rejected || {});
+    box.innerHTML = `
+      <div class="list-row" style="gap:8px;flex-wrap:wrap">
+        <span class="grow"><b>正则匹配 ${r.raw_count} 处, 通过过滤 ${r.count} 处</b></span>
+        ${r.count ? '<span class="tag tag-ok">可用</span>' : '<span class="tag tag-err">样例无命中</span>'}
+      </div>
+      ${rejected.length ? `<div class="field-hint">被挡掉: ${rejected.map(([k, v]) => `${esc(k)} ${v}`).join(' · ')}</div>` : ''}
+      ${r.hint ? `<div class="field-hint">${esc(r.hint)}</div>` : ''}
+      ${(r.matches || []).slice(0, 6).map((m) => `
+        <div class="list-row" style="gap:8px">
+          <span class="grow mono" style="font-size:11.5px">${esc(m.context)}</span>
+          <span class="tag">行 ${m.line_no}</span><span class="tag">熵 ${m.entropy}</span>
+        </div>`).join('')}`;
+  } catch (err) {
+    box.innerHTML = `<div class="field-hint" style="color:#ef8b8b">${esc(err.message)}</div>`;
+  }
+}
+
+async function saveRuleDraft() {
+  const draft = readRuleDraft();
+  if (!draft.pattern.trim()) { toast('先填写正则表达式', 'err'); return; }
+  if (!draft.name) { toast('给规则起个名字', 'err'); return; }
+  try {
+    const r = await api('/api/rules/custom', { method: 'POST', body: JSON.stringify(draft) });
+    toast(`规则 ${r.saved} 已保存并启用`, 'ok');
+    closeModal();
+    renderRules();
+  } catch (err) { toast('保存失败: ' + err.message, 'err'); }
+}
+
+async function downgradeRule(ruleId) {
+  const order = ['critical', 'high', 'medium', 'low', 'info'];
+  const rule = (state.cache.rules || []).find((r) => r.id === ruleId);
+  if (!rule) return;
+  const next = order[Math.min(order.indexOf(rule.severity) + 1, order.length - 1)];
+  if (next === rule.severity) { toast('已经是最低等级了', 'err'); return; }
+  try {
+    await api(`/api/rules/${encodeURIComponent(ruleId)}`, { method: 'PATCH', body: JSON.stringify({ severity: next }) });
+    toast(`「${rule.name}」已降为 ${SEVERITY[next].label}`, 'ok');
+    renderRules();
+  } catch (err) { toast('操作失败: ' + err.message, 'err'); }
+}
+
 async function renderRules() {
-  const data = await api('/api/rules');
+  const [data, quality] = await Promise.all([api('/api/rules'), api('/api/rules/quality')]);
   state.cache.rules = data.items;
+  state.cache.ruleQuality = quality;
   const grouped = {};
   data.items.forEach((r) => { (grouped[r.category] = grouped[r.category] || []).push(r); });
   const cats = Object.keys(grouped).sort();
@@ -1297,9 +1451,12 @@ async function renderRules() {
       <div class="toolbar">
         <span class="muted">共 ${data.items.length} 条规则，启用 ${enabledCount} 条</span>
         <div class="spacer"></div>
+        <button class="btn btn-sm" data-act="new-rule">${icon('plus', 13)}新建规则</button>
+        <div class="spacer"></div>
         <div class="search" style="width:220px">${icon('search')}<input type="text" id="r-q" placeholder="搜索规则名 / ID"></div>
       </div>
     </section>
+    ${ruleQualityCard(quality)}
 
     <div class="grid cols-2b" style="margin-bottom:12px">
       <section class="card">
@@ -1353,7 +1510,9 @@ keywords = ["acme_"]'></textarea>
               </td>
               <td class="shrink mono muted">${r.hits}</td>
               <td class="shrink">${r.builtin ? '<span class="tag">内置</span>' : '<span class="tag tag-ok">导入</span>'}</td>
-              <td class="shrink">${r.builtin ? '' : `<button class="btn btn-icon btn-sm btn-danger" data-act="del-rule" data-id="${esc(r.id)}" title="删除导入规则">${icon('trash', 13)}</button>`}</td>
+              <td class="shrink nowrap">${r.builtin ? '' : `
+                <button class="btn btn-icon btn-sm" data-act="edit-rule" data-id="${esc(r.id)}" title="编辑这条自定义规则">${icon('sliders', 13)}</button>
+                <button class="btn btn-icon btn-sm btn-danger" data-act="del-rule" data-id="${esc(r.id)}" title="删除导入规则">${icon('trash', 13)}</button>`}</td>
             </tr>`).join('')}</tbody>
         </table></div>
       </section>`).join('')}`;
@@ -2190,6 +2349,15 @@ async function handleAction(el, evt) {
   if (act === 'findings-clear') { state.selected.clear(); return renderFindings(); }
   if (act === 'assets-view') { state.assetsView = el.dataset.value; return renderAssets(); }
   if (act === 'asset-history') { stop(event); return openAssetHistory(Number(el.dataset.id)); }
+  if (act === 'new-rule') { openModal(ruleEditor(null)); return; }
+  if (act === 'edit-rule') {
+    stop(event);
+    const rule = (state.cache.rules || []).find((r) => r.id === el.dataset.id);
+    return openModal(ruleEditor(rule));
+  }
+  if (act === 'test-rule') return testRuleDraft();
+  if (act === 'save-rule') return saveRuleDraft();
+  if (act === 'rule-downgrade') { stop(event); return downgradeRule(el.dataset.id); }
   if (act === 'finding-status') { stop(event); return setFindingStatus(Number(el.dataset.id), el.dataset.status); }
   if (act === 'save-notes') {
     const notes = $('#d-notes').value;

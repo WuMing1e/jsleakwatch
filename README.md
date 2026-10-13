@@ -15,6 +15,7 @@
 | 持续监测 | 每站点独立周期（分钟级可配），到期自动入队；全局并发 3 个站点，失败按 15·2ⁿ 分钟退避 |
 | 资产发现 | HTML `<script>` / `modulepreload` / 内联脚本、JS 内动态 `import()`、**webpack/Next.js chunk 映射**、`sourceMappingURL` 映射文件、常见配置入口探测 |
 | 检测引擎 | 78 条规则 + 香农熵校验 + 关键词预过滤 + 占位符/代码路径过滤 + 重叠消歧 + 字符串拼接还原 |
+| 规则可运营 | 在线写自定义规则：正则 + 样例当场验证（走同一套过滤，会告诉你是"没匹配"还是"被占位符/熵值/白名单挡掉"）；规则质量卡用真实命中 + AI 复核结果算出每条规则的误报率并给出降级/关闭建议；`tools/rules_quality.py` 在标注语料上跑 precision/recall，可当回归门槛 |
 | 变更比对 | 以 `规则ID + 命中值哈希` 生成指纹；只对**新出现**或**复现**的凭证告警，消失的自动转「已失效」 |
 | 内容变更历史 | 资产内容变化时留一版「字符串签名」并算出新增/消失的字符串，回答"这次上线改了什么、密钥是哪一版带进来的"。只存签名不存 JS 原文，命中的密钥与高熵串都已掩码，每资产保留最近 12 版 |
 | 跨站凭证关联 | 同一命中值出现在多个站点/文件时，发现列表标出「复用 N 站」，详情里能互相跳转 —— 一把密钥被多处复用通常比单条命中更值得追 |
@@ -414,6 +415,9 @@ JSLW_AI_BASE_URL=http://glm.corp.example.com/v1 JSLW_AI_MODEL=glm-5.2
 | GET | `/api/changes` | 跨站变更流：最近哪些 JS 变了、变了什么（可带 `target_id` / `hours`） |
 | GET | `/api/scans`、`/api/events` | 扫描历史、系统事件 |
 | GET/PATCH | `/api/rules`、`/api/rules/{id}` | 规则列表 / 开关与等级 |
+| POST | `/api/rules/test` | 用一段样例验证正则：返回匹配数、被哪一层过滤挡掉、命中上下文 |
+| POST | `/api/rules/custom` | 新建/覆盖自定义规则（id 自动加 `custom:` 前缀，带前缀的原样保留） |
+| GET | `/api/rules/quality` | 每条规则的命中数、站点数、AI 复核分布、误报率与建议动作 |
 | POST/DELETE | `/api/rules/import`、`/api/rules/custom/{id}` | 导入 / 删除自定义规则 |
 | GET/PUT | `/api/settings` | 采集与告警配置 |
 | POST | `/api/settings/alert/test` | 飞书测试消息 |
@@ -550,6 +554,20 @@ WantedBy=multi-user.target
 2. **接入会执行 JS 的采集器**（Katana `-hl` / JScanner2 的 Playwright）：覆盖运行时才拼出的 URL，代价是速度与资源，见第 8 节。
 
 ## 13. 测试
+
+### 规则质量跑批（离线）
+
+```bash
+# 在冻结语料 + 人工标注上算每条规则的 precision/recall
+python3.10 tools/rules_quality.py --corpus demo --labels work/labels.jsonl
+
+# 存基线；之后改规则再跑，精度掉超过 5% 或低于门槛就非零退出（可挂到提交前检查）
+python3.10 tools/rules_quality.py --corpus demo --labels work/labels.jsonl \
+    --baseline work/rules-quality.json --min-precision 0.8 --max-drop 0.05
+```
+
+规则来源是当前数据库（含开关、等级覆盖与自定义规则），所以调完规则直接重跑就能对比。
+控制台「检测规则」页另有一张规则质量卡，用**真实命中 + AI 复核结果**给出每条规则的误报率与建议。
 
 ```bash
 python3.10 -m pytest tests -q          # 108 个用例

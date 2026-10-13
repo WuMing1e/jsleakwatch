@@ -1,0 +1,7 @@
+{
+ "corpus": "demo",
+ "precision": 0.895,
+ "recall": 0.895,
+ "tp": 17,
+ "fp": 2
+}
