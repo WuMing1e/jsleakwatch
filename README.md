@@ -32,6 +32,8 @@
 
 依赖已在本机 `python3.10` 的 site-packages 中就绪（fastapi / uvicorn / httpx / pydantic / tomli）。
 
+> 当前版本 **1.0.0**，变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+
 ```bash
 ./run.sh                      # 默认监听 127.0.0.1:8787
 # 或
