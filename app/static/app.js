@@ -650,7 +650,7 @@ function openBulkAddModal() {
     <div class="modal-body">
       <label class="field">站点清单
         <textarea id="bulk-urls" rows="8" placeholder="每行一个, 支持域名或完整 URL&#10;example.com&#10;https://a.example.com/app&#10;# 以 # 开头的行会被忽略"></textarea>
-        <span class="field-hint">自动补 https://，按主机名去重，已存在的站点会跳过。</span>
+        <span class="field-hint">自动补 https://，按主机名去重（批内与已有站点都比对），已存在的站点会跳过，单次最多 5000 个。</span>
       </label>
       <div>
         <input type="file" id="bulk-file" data-act="bulk-add-file" accept=".txt,.csv,text/plain" hidden>
