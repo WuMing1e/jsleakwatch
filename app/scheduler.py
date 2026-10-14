@@ -169,6 +169,15 @@ class Scheduler:
         )
         if result.new_findings:
             self.invalidate_notifier()
+            # 推送前补判: 单轮复核有上限, 超出上限的新发现别带着"未复核"发出去
+            pending = [item for item in result.new_findings if not item.get("ai_verdict")]
+            if pending:
+                try:
+                    from .scanner import triage_pending
+                    await triage_pending(pending)
+                except Exception as exc:  # noqa: BLE001 - 补判失败不影响告警
+                    db.log_event(f"推送前补复核异常: {type(exc).__name__}: {exc}"[:200],
+                                 kind="ai", level="warn", target_id=int(target["id"]))
             summary = await self.notifier.notify_findings(result.new_findings)
             if summary.get("sent"):
                 skipped = summary.get("skipped_fake") or 0

@@ -565,6 +565,67 @@ def _can_call(client: "ai.AIClient", cfg: "ai.AIConfig") -> bool:
     return ai.budget_left(cfg) > 0
 
 
+async def _apply_triage(client: "ai.AIClient", cfg: "ai.AIConfig",
+                        item: dict[str, Any]) -> tuple[bool, bool]:
+    """复核一条发现并落库。返回 (是否判定过, 是否被自动标成误报)。"""
+    finding_id = item.get("id")
+    row = db.query_one("SELECT * FROM findings WHERE id=?", (finding_id,)) if finding_id else None
+    if row is None:
+        return False, False
+    payload = {k: row[k] for k in row.keys()}
+    verdict = await ai.triage_finding(client, payload, raw=row["raw_value"] or "")
+    status = row["status"]
+    marked_fp = False
+    if (cfg.auto_mark_false_positive and verdict["verdict"] == "fake"
+            and verdict["confidence"] >= float(cfg.auto_fp_confidence)):
+        status = "false_positive"
+        marked_fp = True
+    db.execute(
+        "UPDATE findings SET ai_verdict=?, ai_confidence=?, ai_reason=?, ai_impact=?, "
+        "ai_remediation=?, ai_model=?, ai_checked_at=?, status=? WHERE id=?",
+        (verdict["verdict"], verdict["confidence"], verdict["reason"],
+         verdict.get("impact", ""), verdict.get("remediation", ""),
+         verdict.get("model", ""), db.utcnow(), status, row["id"]),
+    )
+    item.update({"ai_verdict": verdict["verdict"], "ai_confidence": verdict["confidence"],
+                 "ai_reason": verdict["reason"], "status": status})
+    return True, marked_fp
+
+
+async def triage_pending(items: list[dict[str, Any]], cap: int = 50) -> int:
+    """把还没有 AI 结论的发现补判掉（推送前的最后一次机会）。
+
+    单轮复核上限是为了控制成本，但一条新发现如果没来得及判定就推送，卡片上只能写
+    "未复核" —— 用户看到的第一反应就是"为什么没判就发了"。所以在推送前补一轮，
+    仍然受当日总预算约束，判定结果与正常复核完全一致（共用缓存）。
+    """
+    cfg = ai.ai_config()
+    if not (cfg.enabled and cfg.verify_new_findings):
+        return 0
+    pending = [item for item in items if item.get("id") and not item.get("ai_verdict")]
+    if not pending:
+        return 0
+    budget = min(max(0, cap), ai.budget_left(cfg))
+    if budget <= 0:
+        return 0
+    client = ai.AIClient(cfg)
+    done = 0
+    for item in pending[:budget]:
+        if ai.budget_left(cfg) <= 0:
+            break
+        try:
+            triaged, _ = await _apply_triage(client, cfg, item)
+        except Exception as exc:  # noqa: BLE001 - 补判失败不该影响推送
+            db.log_event(f"推送前补复核失败: {type(exc).__name__}: {exc}"[:200],
+                         kind="ai", level="warn")
+            break
+        if triaged:
+            done += 1
+    if done:
+        db.log_event(f"推送前补复核 {done} 条(超出单轮复核上限的部分)", kind="ai")
+    return done
+
+
 # ------------------------------------------------------------ 外部分析器(并联)
 
 def _external_analyzers() -> list[tuple[str, Any]]:
@@ -782,27 +843,15 @@ async def _ai_phase(
             if not _can_call(client, ai_cfg):
                 summary["errors"].append("已达当日调用上限, 剩余发现未复核")
                 break
-            finding_id = item.get("id")
-            row = db.query_one("SELECT * FROM findings WHERE id=?", (finding_id,)) if finding_id else None
-            if row is None:
-                continue
-            payload = {k: row[k] for k in row.keys()}
-            verdict = await ai.triage_finding(client, payload, raw=row["raw_value"] or "")
-            status = row["status"]
-            if (ai_cfg.auto_mark_false_positive and verdict["verdict"] == "fake"
-                    and verdict["confidence"] >= float(ai_cfg.auto_fp_confidence)):
-                status = "false_positive"
-                summary["false_positives"] += 1
-            db.execute(
-                "UPDATE findings SET ai_verdict=?, ai_confidence=?, ai_reason=?, ai_impact=?, "
-                "ai_remediation=?, ai_model=?, ai_checked_at=?, status=? WHERE id=?",
-                (verdict["verdict"], verdict["confidence"], verdict["reason"],
-                 verdict.get("impact", ""), verdict.get("remediation", ""),
-                 verdict.get("model", ""), db.utcnow(), status, row["id"]),
-            )
-            item.update({"ai_verdict": verdict["verdict"], "ai_confidence": verdict["confidence"],
-                         "ai_reason": verdict["reason"], "status": status})
-            summary["triaged"] += 1
+            triaged, marked_fp = await _apply_triage(client, ai_cfg, item)
+            if triaged:
+                summary["triaged"] += 1
+                if marked_fp:
+                    summary["false_positives"] += 1
+        overflow = len(result.new_findings) - limit
+        if overflow > 0:
+            # 这些会在推送前补判（triage_pending）, 这里先记一笔让原因可见
+            summary["errors"].append(f"{overflow} 条超出单轮复核上限")
 
     semantic_ran = False
     if ai_cfg.semantic_scan and semantic_pool:

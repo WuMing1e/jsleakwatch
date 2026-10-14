@@ -389,3 +389,44 @@ def test_ai_phase_triages_new_findings_and_marks_false_positives() -> None:
     assert row["status"] == "false_positive"
     assert row["ai_verdict"] == "fake" and row["ai_confidence"] == 0.95
     assert "占位符" in row["ai_reason"]
+
+
+def test_triage_pending_judges_findings_left_over_by_the_per_scan_cap() -> None:
+    """单轮上限之外的新发现, 推送前会被补判, 不该带着"未复核"发出去。"""
+    from app import scanner
+
+    target_id = int(db.execute(
+        "INSERT INTO targets(name, base_url, created_at) VALUES(?,?,?)",
+        ("补判站点", "http://late.test/", db.utcnow()),
+    ).lastrowid or 0)
+    ids = []
+    for index in range(3):
+        ids.append(int(db.execute(
+            "INSERT INTO findings(target_id, rule_id, rule_name, severity, category, fingerprint, "
+            "match_masked, match_sha256, context, asset_url, first_seen_at, last_seen_at, status) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'new')",
+            (target_id, "database-url", "数据库连接串", "high", "database", f"fp-late-{index}",
+             "redi...79/0(len=49)", f"sha-{index}", 'redis: "redis://u:p@h:6379/0"',
+             "http://late.test/app.js", db.utcnow(), db.utcnow()),
+        ).lastrowid or 0))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return chat_response('{"verdict":"real","confidence":0.88,"reason":"真实连接串",'
+                             '"impact":"可直连数据库","remediation":"改用环境变量"}')
+
+    ai_cfg = cfg(auto_mark_false_positive=False, semantic_scan=False,
+                 max_calls_per_scan=1, max_calls_per_day=50)
+    original_client, original_config = ai.AIClient, ai.ai_config
+    ai.AIClient = lambda c, transport=None: original_client(c, transport=make_transport(handler))  # type: ignore[assignment]
+    ai.ai_config = lambda: ai_cfg  # type: ignore[assignment]
+    try:
+        items = [{"id": fid, "rule_id": "database-url", "severity": "high",
+                  "masked": "redi...79/0(len=49)", "asset_url": "http://late.test/app.js"} for fid in ids]
+        done = asyncio.run(scanner.triage_pending(items, cap=5))
+    finally:
+        ai.AIClient, ai.ai_config = original_client, original_config  # type: ignore[assignment]
+
+    assert done == 3, "三条都应被补判"
+    assert all(item["ai_verdict"] == "real" for item in items)
+    rows = db.query("SELECT ai_verdict, ai_confidence FROM findings WHERE id IN (?,?,?)", tuple(ids))
+    assert all(row["ai_verdict"] == "real" and row["ai_confidence"] == 0.88 for row in rows)
