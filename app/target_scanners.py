@@ -127,7 +127,7 @@ class JScanner2Scanner:
     mode: str = "run"
     depth: int = 1
     use_ai: bool = False
-    timeout: int = 600
+    timeout: int = 300        # 单站最长等待; 大站点单轮十几分钟会拖住整个队列
     db_path: str = "Result/JScanner_Result.db"
     name = "jscanner2"
     label = "JScanner2 (AST + AI 判定)"

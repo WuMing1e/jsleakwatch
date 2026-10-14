@@ -2006,6 +2006,9 @@ async function renderSettings() {
           <option value="import"${conf.mode === 'import' ? ' selected' : ''}>只导入已有结果</option>
         </select>
       </label>
+      <label class="field" style="width:110px">超时 (秒)
+        <input type="number" min="30" max="3600" data-scanner-timeout="${esc(name)}" value="${esc(conf.timeout || 600)}">
+      </label>
     </div>`;
   }).join('');
 
@@ -2160,6 +2163,10 @@ async function saveScannerSettings() {
   $$('[data-scanner-mode]').forEach((select) => {
     const name = select.dataset.scannerMode;
     target[name] = { ...(target[name] || {}), mode: select.value };
+  });
+  $$('[data-scanner-timeout]').forEach((input) => {
+    const name = input.dataset.scannerTimeout;
+    target[name] = { ...(target[name] || {}), timeout: Math.max(30, Number(input.value || 600)) };
   });
   try {
     await api('/api/settings', { method: 'PUT', body: JSON.stringify({

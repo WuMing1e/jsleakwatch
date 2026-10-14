@@ -1,6 +1,7 @@
 """无头渲染运行时采集的测试（不真的启动浏览器）。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -53,7 +54,7 @@ def test_render_without_chrome_degrades(monkeypatch) -> None:
 
 
 def _stub_render(dom: str, requests: list[tuple[str, str]]):
-    def fake_render(url, timeout=0, wait_ms=0, chrome=None):
+    async def fake_render(url, timeout=0, wait_ms=0, chrome=None):
         return runtime.RenderResult(url=url, ok=True, dom=dom, requests=requests, duration_ms=1)
     return fake_render
 
@@ -64,7 +65,7 @@ def test_collect_runtime_seeds_picks_dom_and_get_requests(monkeypatch) -> None:
       <script src="/js/app.js"></script>
       <script src="/js/lazy-9f2c1d.js"></script>
     </body></html>"""
-    monkeypatch.setattr(runtime, "render", _stub_render(rendered, [
+    monkeypatch.setattr(runtime, "render_page", _stub_render(rendered, [
         ("GET", "http://t/"),                                  # 入口页本身, 跳过
         ("GET", "http://t/api/runtime-config.json"),           # 运行时接口, 收
         ("POST", "http://t/api/save"),                         # 写请求, 不收
@@ -74,7 +75,7 @@ def test_collect_runtime_seeds_picks_dom_and_get_requests(monkeypatch) -> None:
     target = {"id": 1, "base_url": "http://t/"}
     extractor = Extractor(base_url="http://t/", scope="same-origin")
     cfg = ScanConfig(headless_render=True, max_api_endpoints=5, max_render_pages=1)
-    seeds, notes = collect_runtime_seeds(target, cfg, extractor)
+    seeds, notes = asyncio.run(collect_runtime_seeds(target, cfg, extractor))
     urls = {c.url: c.kind for c in seeds}
     assert notes == []
     assert urls.get("http://t/api/runtime-config.json") == "api"
@@ -86,6 +87,6 @@ def test_collect_runtime_seeds_picks_dom_and_get_requests(monkeypatch) -> None:
 def test_collect_runtime_seeds_reports_missing_chrome(monkeypatch) -> None:
     monkeypatch.setattr(runtime, "find_chrome", lambda: None)
     cfg = ScanConfig(headless_render=True)
-    seeds, notes = collect_runtime_seeds({"id": 1, "base_url": "http://t/"},
-                                         cfg, Extractor(base_url="http://t/"))
+    seeds, notes = asyncio.run(collect_runtime_seeds({"id": 1, "base_url": "http://t/"},
+                                                    cfg, Extractor(base_url="http://t/")))
     assert seeds == [] and notes and "Chrome" in notes[0]

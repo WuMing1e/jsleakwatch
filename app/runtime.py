@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import glob
 import json
 import os
@@ -100,9 +101,13 @@ def parse_netlog(path: str | Path) -> list[tuple[str, str]]:
     return out
 
 
-def render(url: str, timeout: float = 30.0, wait_ms: int = 4000,
-           chrome: str | None = None) -> RenderResult:
-    """渲染一个页面: 返回执行后的 DOM 与它发出的请求。"""
+async def render_page(url: str, timeout: float = 30.0, wait_ms: int = 4000,
+                      chrome: str | None = None) -> RenderResult:
+    """渲染一个页面（异步版）: 返回执行后的 DOM 与它发出的请求。
+
+    扫描器跑在 API 同一个事件循环里，所以这里必须用异步子进程 —— 早期用
+    subprocess.run 时，每渲染一页就把整个控制台卡住 1~3 秒。
+    """
     binary = chrome or find_chrome()
     result = RenderResult(url=url)
     if not binary:
@@ -112,33 +117,44 @@ def render(url: str, timeout: float = 30.0, wait_ms: int = 4000,
     netlog = Path(profile) / "netlog.json"
     started = time.monotonic()
     try:
-        proc = subprocess.run(
-            [
-                binary, "--headless=new", "--no-sandbox", "--disable-gpu",
-                "--disable-dev-shm-usage", "--disable-extensions", "--no-first-run",
-                "--hide-scrollbars", "--mute-audio",
-                f"--user-data-dir={profile}",
-                f"--log-net-log={netlog}", "--net-log-capture-mode=IncludeSensitive",
-                f"--virtual-time-budget={max(500, int(wait_ms))}",
-                "--dump-dom", url,
-            ],
-            capture_output=True, text=True, timeout=timeout,
+        proc = await asyncio.create_subprocess_exec(
+            binary, "--headless=new", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--disable-extensions", "--no-first-run",
+            "--hide-scrollbars", "--mute-audio",
+            f"--user-data-dir={profile}",
+            f"--log-net-log={netlog}", "--net-log-capture-mode=IncludeSensitive",
+            f"--virtual-time-budget={max(500, int(wait_ms))}",
+            "--dump-dom", url,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env={**os.environ, "HOME": profile},   # 别碰用户自己的浏览器配置
         )
-        result.dom = proc.stdout or ""
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            result.error = f"渲染超时 ({int(timeout)}s)"
+            return result
+        result.dom = (stdout or b"").decode("utf-8", "replace")
         result.requests = parse_netlog(netlog)
         result.ok = bool(result.dom.strip())
         if not result.ok:
-            detail = (proc.stderr or "").strip().splitlines()
+            detail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()
             result.error = detail[-1][:200] if detail else "渲染没有输出"
-    except subprocess.TimeoutExpired:
-        result.error = f"渲染超时 ({int(timeout)}s)"
     except Exception as exc:  # noqa: BLE001 - 渲染失败不该影响整轮扫描
         result.error = f"{type(exc).__name__}: {exc}"[:200]
     finally:
         shutil.rmtree(profile, ignore_errors=True)
         result.duration_ms = int((time.monotonic() - started) * 1000)
     return result
+
+
+def render(url: str, timeout: float = 30.0, wait_ms: int = 4000,
+           chrome: str | None = None) -> RenderResult:
+    """同步包装: 给命令行工具与测试用。"""
+    import asyncio
+
+    return asyncio.run(render_page(url, timeout=timeout, wait_ms=wait_ms, chrome=chrome))
 
 
 def same_origin(a: str, b: str) -> bool:

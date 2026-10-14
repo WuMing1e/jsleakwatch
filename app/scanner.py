@@ -123,7 +123,7 @@ def bump_rules_revision() -> int:
 
 # ------------------------------------------------------------ 主流程
 
-def collect_runtime_seeds(
+async def collect_runtime_seeds(
     target: dict[str, Any], cfg: ScanConfig, extractor: Extractor
 ) -> tuple[list[Candidate], list[str]]:
     """用无头浏览器把入口页面真跑一遍, 补出静态抓不到的东西。
@@ -131,7 +131,7 @@ def collect_runtime_seeds(
     两样收获: 执行后 DOM 里新出现的脚本引用, 以及运行时才拼出来的接口地址。
     浏览器不存在时直接返回空, 扫描照常继续。
     """
-    from .runtime import find_chrome, render, same_origin
+    from .runtime import find_chrome, render_page, same_origin
 
     if not find_chrome():
         return [], ["未找到 Chrome/Chromium, 无头渲染已跳过 (可用 JSLW_CHROME_PATH 指定)"]
@@ -142,8 +142,8 @@ def collect_runtime_seeds(
     seen: set[str] = set()
     api_budget = max(0, int(cfg.max_api_endpoints or 0))
     for page in pages[: max(1, int(cfg.max_render_pages or 1))]:
-        result = render(page, timeout=max(10.0, cfg.timeout_seconds + 15),
-                        wait_ms=max(500, int(cfg.render_wait_ms or 4000)))
+        result = await render_page(page, timeout=max(10.0, cfg.timeout_seconds + 15),
+                                   wait_ms=max(500, int(cfg.render_wait_ms or 4000)))
         if not result.ok:
             notes.append(f"无头渲染失败: {result.error}")
             continue
@@ -227,7 +227,7 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
         # 可选: 无头浏览器把页面真跑一遍, 补出"执行后才出现"的脚本与运行时接口地址
         runtime_seeds: list[Candidate] = []
         if cfg.headless_render:
-            runtime_seeds, runtime_notes = collect_runtime_seeds(target, cfg, extractor)
+            runtime_seeds, runtime_notes = await collect_runtime_seeds(target, cfg, extractor)
             result.runtime_seeds = len(runtime_seeds)
             errors.extend(runtime_notes)
 
@@ -293,8 +293,11 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                     else:
                         if prev and prev.get("recheck"):
                             db.execute("UPDATE assets SET recheck=0 WHERE id=?", (asset_id,))
-                        asset_dets = _detect(detector, resp.text, target_id, cand.url,
-                                             cfg.store_raw_secrets)
+                        # 正则检测是纯 CPU: 丢到线程里跑, 别把整个控制台的事件循环堵住
+                        asset_dets = await asyncio.to_thread(
+                            _detect, detector, resp.text, target_id, cand.url,
+                            cfg.store_raw_secrets,
+                        )
                         # 接口响应常带时间戳/随机串, 每轮都不一样, 记版本只会把变更流刷满
                         if cand.kind != "api":
                             recorded = asset_history.record_version(
@@ -1030,8 +1033,10 @@ async def semantic_scan_target(target: dict[str, Any], limit: int = 5) -> dict[s
             if not result.ok or not result.text:
                 continue
             scanned += 1
-            raws = [d.raw for d in _detect(detector, result.text, target_id, row["url"], store_raw)
-                    if d.raw]
+            detected = await asyncio.to_thread(
+                _detect, detector, result.text, target_id, row["url"], store_raw
+            )
+            raws = [d.raw for d in detected if d.raw]
             client = ai.AIClient(ai_cfg)
             for candidate in await ai.semantic_scan_text(client, result.text, row["url"], redact=raws):
                 created, _fingerprint, payload = _insert_ai_finding(target_id, row["url"], candidate)

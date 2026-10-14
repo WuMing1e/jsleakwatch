@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from typing import Iterable, Iterator
 
@@ -420,6 +421,8 @@ RULE_INDEX: dict[str, Rule] = {r.id: r for r in RULES}
 
 MAX_SCAN_BYTES = 8_000_000
 
+_NEWLINE_RE = re.compile("\n")
+
 
 def explain_rule(rule: Rule, text: str, allowlist: Iterable[str] = (), limit: int = 20) -> dict:
     """给规则编辑器用: 跑一遍这条规则, 说明"匹配到几处、被哪些过滤器挡掉多少"。
@@ -564,6 +567,9 @@ class Detector:
         if len(text) > MAX_SCAN_BYTES:
             text = text[:MAX_SCAN_BYTES]
         lowered = text.lower()
+        # 行号用"换行符位置表 + 二分"算: 以前每条命中都 text.count("\n") 一遍,
+        # 大文件上成千上万条命中时这一项就吃掉两成检测耗时
+        newlines = [match.start() for match in _NEWLINE_RE.finditer(text)]
         results: list[Detection] = []
 
         for rule, pattern in self.compiled:
@@ -599,7 +605,7 @@ class Detector:
 
                 masked = mask_value(raw)
                 context = self._context(text, start, raw, masked)
-                line_no = text.count("\n", 0, start) + 1
+                line_no = bisect_left(newlines, start) + 1
                 digest = hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
                 fingerprint = hashlib.sha256(
                     f"{rule.id}|{target_id}|{digest}".encode()
@@ -629,26 +635,43 @@ class Detector:
 
         典型场景: 一个 redis://user:pass@host 既命中 basic-auth-url 又命中
         database-url; 一个 AWS AK 既命中专用规则又命中通用高熵规则。
+
+        判定规则不变（被更高优先级的重叠命中压掉），但先按位置切成互不重叠的簇:
+        不同簇之间不可能重叠，于是大文件里成千上万条命中不再两两比较 —— 这是
+        扫描慢的头号开销（2MB 压缩产物上实测占检测总耗时的 7 成）。
         """
         if len(items) < 2:
             return items
         def rank(item: Detection) -> tuple[int, int]:
             return (SEVERITY_ORDER.get(item.severity, 0), PRECEDENCE.get(item.rule_id, DEFAULT_PRECEDENCE))
 
-        keep: list[Detection] = []
-        for index, item in enumerate(items):
-            dominated = False
-            for other_index, other in enumerate(items):
-                if index == other_index:
-                    continue
-                if other.end <= item.start or other.start >= item.end:
-                    continue
-                if rank(other) > rank(item):
-                    dominated = True
-                    break
-            if not dominated:
-                keep.append(item)
-        return keep
+        clusters: list[list[int]] = []
+        current: list[int] = []
+        cluster_end = -1
+        for index in sorted(range(len(items)), key=lambda i: (items[i].start, items[i].end)):
+            item = items[index]
+            if current and item.start >= cluster_end:
+                clusters.append(current)
+                current, cluster_end = [], -1
+            current.append(index)
+            cluster_end = max(cluster_end, item.end)
+        if current:
+            clusters.append(current)
+
+        drop: set[int] = set()
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            for index in cluster:
+                item = items[index]
+                for other_index in cluster:
+                    other = items[other_index]
+                    if other_index == index or other.end <= item.start or other.start >= item.end:
+                        continue
+                    if rank(other) > rank(item):
+                        drop.add(index)
+                        break
+        return [item for index, item in enumerate(items) if index not in drop]
 
     @staticmethod
     def _context(text: str, start: int, raw: str, masked: str, span: int = 160) -> str:
