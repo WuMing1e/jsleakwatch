@@ -18,6 +18,7 @@ from . import ai, asset_history, db, gating
 from .config import SETTINGS, ScanConfig
 from .discover import Extractor, Candidate, config_probe_candidates
 from .fetcher import Fetcher
+from .analyzers import kind_from_url
 from .rules import (
     CONCAT_RE,
     Detection,
@@ -50,6 +51,7 @@ class ScanResult:
     ai_summary: dict[str, Any] = field(default_factory=dict)
     discovery_backend: str = "builtin"
     discovery_seeds: int = 0
+    runtime_seeds: int = 0
     analyzer_summary: dict[str, Any] = field(default_factory=dict)
     target_scanner_summary: dict[str, Any] = field(default_factory=dict)
 
@@ -72,6 +74,9 @@ def scan_config_from_settings(overrides: dict[str, Any] | None = None) -> ScanCo
         store_raw_secrets=SETTINGS.scan.store_raw_secrets,
         scan_api_endpoints=SETTINGS.scan.scan_api_endpoints,
         max_api_endpoints=SETTINGS.scan.max_api_endpoints,
+        headless_render=SETTINGS.scan.headless_render,
+        max_render_pages=SETTINGS.scan.max_render_pages,
+        render_wait_ms=SETTINGS.scan.render_wait_ms,
     )
     stored = db.get_setting("scan") or {}
     for key, value in stored.items():
@@ -117,6 +122,50 @@ def bump_rules_revision() -> int:
 
 
 # ------------------------------------------------------------ 主流程
+
+def collect_runtime_seeds(
+    target: dict[str, Any], cfg: ScanConfig, extractor: Extractor
+) -> tuple[list[Candidate], list[str]]:
+    """用无头浏览器把入口页面真跑一遍, 补出静态抓不到的东西。
+
+    两样收获: 执行后 DOM 里新出现的脚本引用, 以及运行时才拼出来的接口地址。
+    浏览器不存在时直接返回空, 扫描照常继续。
+    """
+    from .runtime import find_chrome, render, same_origin
+
+    if not find_chrome():
+        return [], ["未找到 Chrome/Chromium, 无头渲染已跳过 (可用 JSLW_CHROME_PATH 指定)"]
+    base = target["base_url"]
+    seeds: list[Candidate] = []
+    notes: list[str] = []
+    pages = [base]
+    seen: set[str] = set()
+    api_budget = max(0, int(cfg.max_api_endpoints or 0))
+    for page in pages[: max(1, int(cfg.max_render_pages or 1))]:
+        result = render(page, timeout=max(10.0, cfg.timeout_seconds + 15),
+                        wait_ms=max(500, int(cfg.render_wait_ms or 4000)))
+        if not result.ok:
+            notes.append(f"无头渲染失败: {result.error}")
+            continue
+        for cand in extractor.from_html(page, result.dom, 0):
+            if cand.url not in seen:
+                seen.add(cand.url)
+                seeds.append(cand)
+        for method, url in result.requests:
+            if method != "GET" or not same_origin(url, base) or url.split("#")[0] in seen:
+                continue
+            if url.split("#")[0] == base:
+                continue
+            kind = kind_from_url(url)
+            if kind == "json":
+                if api_budget <= 0:
+                    continue
+                api_budget -= 1
+                kind = "api"
+            seen.add(url.split("#")[0])
+            seeds.append(Candidate(url=url, kind=kind, depth=0, label="无头渲染运行时请求"))
+    return seeds, notes
+
 
 async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
     import time
@@ -175,11 +224,19 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                 errors.append(f"katana: {type(exc).__name__}: {exc}"[:200])
             result.discovery_seeds = len(extra_seeds)
 
+        # 可选: 无头浏览器把页面真跑一遍, 补出"执行后才出现"的脚本与运行时接口地址
+        runtime_seeds: list[Candidate] = []
+        if cfg.headless_render:
+            runtime_seeds, runtime_notes = collect_runtime_seeds(target, cfg, extractor)
+            result.runtime_seeds = len(runtime_seeds)
+            errors.extend(runtime_notes)
+
         async with Fetcher(cfg) as fetcher:
             frontier: list[Candidate] = [
                 Candidate(url=target["base_url"], kind="html", depth=0, label="入口页面")
             ]
             frontier.extend(extra_seeds)
+            frontier.extend(runtime_seeds)
             if target.get("probe_common_config", 1) and cfg.probe_common_config:
                 frontier.extend(config_probe_candidates(target["base_url"]))
 

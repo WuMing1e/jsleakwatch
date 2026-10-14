@@ -162,6 +162,7 @@ class Scheduler:
             f"(新增 {result.assets_new}, 复用 {result.assets_skipped}), "
             f"新发现 {len(result.new_findings)} 条, 失效 {result.resolved} 条"
             + (f", 内容变更 {result.assets_changed} 个" if result.assets_changed else "")
+            + (f", 无头渲染补 {result.runtime_seeds} 个地址" if result.runtime_seeds else "")
             + (f", {result.discovery_backend} 补充种子 {result.discovery_seeds} 个"
                if result.discovery_seeds else ""),
             kind="scan", level=level, target_id=int(target["id"]),

@@ -48,6 +48,9 @@ class ScanConfig:
     store_raw_secrets: bool = False    # 默认只存掩码值, 不落库明文
     scan_api_endpoints: bool = False   # 顺带 GET 同源接口响应并扫描（默认关, 属于额外请求）
     max_api_endpoints: int = 20        # 单站最多抓几个接口
+    headless_render: bool = False      # 用无头浏览器渲染页面, 补运行时才出现的地址（默认关）
+    max_render_pages: int = 1          # 单站最多渲染几个页面
+    render_wait_ms: int = 4000         # 渲染等待时间（虚拟时间预算）
     # 带凭据采集（仅用于已授权目标）：额外请求头与 Cookie，
     # 用来覆盖"登录后才下发"的 JS；留空即匿名采集。
     extra_headers: dict[str, str] = field(default_factory=dict)

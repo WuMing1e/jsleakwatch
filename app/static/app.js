@@ -1658,11 +1658,19 @@ async function renderSettings() {
             <label class="switch"><input type="checkbox" id="s-tls" ${scan.verify_tls ? 'checked' : ''}><span class="track"></span>校验 TLS 证书</label>
             <label class="switch"><input type="checkbox" id="s-raw" ${scan.store_raw_secrets ? 'checked' : ''}><span class="track"></span>入库保存明文命中值 (默认关闭)</label>
             <label class="switch"><input type="checkbox" id="s-api" ${scan.scan_api_endpoints ? 'checked' : ''}><span class="track"></span>扫描接口响应 (只 GET 同源读接口)</label>
+            <label class="switch"><input type="checkbox" id="s-headless" ${scan.headless_render ? 'checked' : ''}><span class="track"></span>无头浏览器渲染页面 (需 Chrome，明显更慢)</label>
           </div>
           <div class="form-row">
             <label class="field">单站接口上限 (条)
               <input type="number" id="s-apimax" min="0" max="200" value="${esc(scan.max_api_endpoints || 20)}">
               <span class="field-hint">只收 JS 里以 GET 语义出现的同源地址；带变量的模板地址一律跳过，不猜参数。</span>
+            </label>
+            <label class="field">无头渲染页数 (个)
+              <input type="number" id="s-renderpages" min="1" max="10" value="${esc(scan.max_render_pages || 1)}">
+              <span class="field-hint">渲染会执行页面 JS，能拿到运行时才出现的脚本与接口；走匿名请求，不带采集凭据。</span>
+            </label>
+            <label class="field">渲染等待 (毫秒)
+              <input type="number" id="s-renderwait" min="500" max="30000" step="500" value="${esc(scan.render_wait_ms || 4000)}">
             </label>
           </div>
           <div style="display:flex;gap:8px">
@@ -2005,6 +2013,9 @@ async function saveScanSettings() {
       store_raw_secrets: $('#s-raw').checked,
       scan_api_endpoints: $('#s-api').checked,
       max_api_endpoints: Number($('#s-apimax').value || 20),
+      headless_render: $('#s-headless').checked,
+      max_render_pages: Number($('#s-renderpages').value || 1),
+      render_wait_ms: Number($('#s-renderwait').value || 4000),
     },
     discovery: {
       backend: $('#s-discovery').value,

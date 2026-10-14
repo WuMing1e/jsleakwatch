@@ -206,3 +206,27 @@ def test_api_endpoint_responses_are_scanned(prepared) -> None:
     finally:
         db.set_setting("scan", {**(db.get_setting("scan") or {}),
                                 "scan_api_endpoints": False})
+
+
+def test_headless_render_finds_runtime_only_addresses(prepared) -> None:
+    """无头渲染能拿到静态抓取看不到的运行时接口地址（这里关掉静态接口采集来对照）。"""
+    import asyncio
+
+    from app.runtime import find_chrome
+    from app.scanner import scan_target
+
+    if not find_chrome():
+        pytest.skip("本机没有 Chrome/Chromium，跳过无头渲染用例")
+    target, db = prepared
+    previous = db.get_setting("scan") or {}
+    db.set_setting("scan", {**previous, "headless_render": True, "max_render_pages": 1,
+                            "scan_api_endpoints": False})
+    try:
+        result = asyncio.run(scan_target(target))
+        assert result.status == "ok"
+        assert result.runtime_seeds >= 1, "无头渲染应补出至少一个地址"
+        urls = {row["url"] for row in db.query("SELECT url FROM assets WHERE kind='api'")}
+        assert any(url.endswith("/api/runtime-config.json") for url in urls), \
+            "运行时才发起的接口地址应由渲染补出来"
+    finally:
+        db.set_setting("scan", previous)
