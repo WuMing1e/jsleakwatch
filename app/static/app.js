@@ -469,6 +469,7 @@ async function renderTargets() {
   const data = await api('/api/targets?' + params);
   const items = Array.isArray(data) ? data : (data.items || []);
   const total = data.total != null ? data.total : items.length;
+  state.cache.targets = items;      // 编辑按钮要按 id 回查, 之前只有发现页缓存过
   const view = $('#view');
   view.innerHTML = `
     <section class="card">
@@ -502,7 +503,7 @@ async function renderTargets() {
                 </div>
               </td>
               <td class="shrink">${targetStatusTag(t)}</td>
-              <td class="shrink muted">${Math.round(t.interval_minutes / 60 * 10) / 10} 小时</td>
+              <td class="shrink muted">${fmtInterval(t.interval_minutes)}</td>
               <td class="shrink">${t.open_count ? `<b style="color:#ffb877">${t.open_count}</b>` : '<span class="muted">0</span>'}</td>
               <td class="shrink muted mono">${t.asset_count}</td>
               <td class="shrink muted nowrap" style="font-size:11.5px">${fromNow(t.last_scan_at)}</td>
@@ -529,6 +530,51 @@ async function renderTargets() {
       renderTargets();
     }, 300);
   };
+}
+
+/* 巡检周期: 库里统一存分钟, 界面按 分钟/小时/天/周 输入, 大周期默认落到天与周 */
+const INTERVAL_UNITS = [
+  { key: 'minute', label: '分钟', minutes: 1 },
+  { key: 'hour', label: '小时', minutes: 60 },
+  { key: 'day', label: '天', minutes: 1440 },
+  { key: 'week', label: '周', minutes: 10080 },
+];
+const INTERVAL_LABEL = { minute: '分钟', hour: '小时', day: '天', week: '周' };
+
+/* 1440 → 1 天, 10080 → 1 周, 90 → 90 分钟: 取最大且能整除的那个单位 */
+function splitInterval(minutes) {
+  const value = Math.max(1, Math.round(Number(minutes) || 0));
+  for (const unit of [...INTERVAL_UNITS].reverse()) {
+    if (value >= unit.minutes && value % unit.minutes === 0) {
+      return { value: value / unit.minutes, unit: unit.key };
+    }
+  }
+  return { value, unit: 'minute' };
+}
+
+function fmtInterval(minutes) {
+  const { value, unit } = splitInterval(minutes);
+  return `${value} ${INTERVAL_LABEL[unit]}`;
+}
+
+function intervalField(id, minutes, label = '巡检周期', hint = '') {
+  const { value, unit } = splitInterval(minutes);
+  return `<label class="field">${label}
+    <div class="interval-row">
+      <input type="number" id="${id}" min="1" max="43200" value="${value}">
+      <select id="${id}-unit">
+        ${INTERVAL_UNITS.map((u) => `<option value="${u.key}"${u.key === unit ? ' selected' : ''}>${u.label}</option>`).join('')}
+      </select>
+    </div>
+    ${hint ? `<span class="field-hint">${hint}</span>` : ''}
+  </label>`;
+}
+
+function readInterval(id) {
+  const value = Math.max(1, Number($('#' + id).value || 1));
+  const unit = $('#' + id + '-unit').value;
+  const factor = (INTERVAL_UNITS.find((u) => u.key === unit) || INTERVAL_UNITS[0]).minutes;
+  return Math.min(43200, Math.round(value * factor));   // 上限 30 天, 与后端一致
 }
 
 /* 站点批量操作条: 有选中项时才出现 */
@@ -577,6 +623,7 @@ async function runBulk(op, extra) {
   state.bulkBusy = true;
   try {
     const body = { ids, action: op, ...(extra || {}) };
+    if (op === 'interval' && extra && extra.interval_minutes) state.lastInterval = extra.interval_minutes;
     if (state.targetsBulkAll) {
       body.all_matching = true;
       body.q = state.targetsQuery || '';
@@ -611,9 +658,7 @@ function openBulkAddModal() {
         <span class="field-hint" id="bulk-file-name" style="margin-left:9px"></span>
       </div>
       <div class="form-row-3">
-        <label class="field">巡检周期 (分钟)
-          <input type="number" id="bulk-add-interval" min="1" max="43200" value="1440">
-        </label>
+        ${intervalField('bulk-add-interval', 1440, '巡检周期')}
         <label class="field">页面递归深度
           <input type="number" id="bulk-add-depth" min="0" max="4" value="1">
         </label>
@@ -661,7 +706,7 @@ async function runBulkAdd() {
       method: 'POST',
       body: JSON.stringify({
         text,
-        interval_minutes: Number($('#bulk-add-interval').value || 1440),
+        interval_minutes: readInterval('bulk-add-interval'),
         max_depth: Number($('#bulk-add-depth').value || 1),
         max_assets: Number($('#bulk-add-assets').value || 60),
         enabled: $('#bulk-add-enabled').checked,
@@ -708,11 +753,9 @@ function openIntervalModal() {
     <div class="modal-head"><h2>批量修改巡检周期</h2>
       <button class="btn btn-ghost btn-icon btn-sm" data-act="close-modal">${icon('x', 14)}</button></div>
     <div class="modal-body">
-      <label class="field">巡检周期 (分钟)
-        <input type="number" id="bulk-interval" min="1" max="43200" value="1440">
-      </label>
-      <div class="field-hint">将对已选的 ${state.selectedTargets.size} 个站点生效。
-        常用值：60（每小时）、360（6 小时）、1440（每天）、10080（每周）。</div>
+      ${intervalField('bulk-interval', state.lastInterval || 1440, '巡检周期',
+                      '常用：1 天、3 天、1 周；需要更密集的巡检可以切到小时。')}
+      <div class="field-hint">将对已选的 ${state.selectedTargets.size} 个站点生效。</div>
     </div>
     <div class="modal-foot">
       <button class="btn" data-act="close-modal">取消</button>
@@ -723,7 +766,7 @@ function openIntervalModal() {
 
 function targetForm(t) {
   const isEdit = !!t;
-  const data = t || { name: '', base_url: '', interval_minutes: 360, scope: 'same-origin', max_depth: 2, max_assets: 400, include_sourcemaps: 1, probe_common_config: 1, notes: '' };
+  const data = t || { name: '', base_url: '', interval_minutes: 1440, scope: 'same-origin', max_depth: 2, max_assets: 400, include_sourcemaps: 1, probe_common_config: 1, notes: '' };
   return `
     <div class="modal-head">
       <h2>${isEdit ? '编辑站点' : '新增监测站点'}</h2>
@@ -738,9 +781,8 @@ function targetForm(t) {
         <span class="field-hint">会从该页面出发, 递归发现脚本、按需加载 chunk 与 sourcemap。</span>
       </label>
       <div class="form-row">
-        <label class="field">巡检周期 (分钟)
-          <input type="number" id="f-interval" min="1" value="${esc(data.interval_minutes)}">
-        </label>
+        ${intervalField('f-interval', data.interval_minutes, '巡检周期',
+                        '按天或周设置最常见；周期越短采集越频繁。')}
         <label class="field">采集范围
           <select id="f-scope">
             <option value="same-origin"${data.scope === 'same-origin' ? ' selected' : ''}>同源 (推荐)</option>
@@ -787,7 +829,7 @@ async function saveTarget(id) {
   const payload = {
     name: $('#f-name').value.trim(),
     base_url: $('#f-url').value.trim(),
-    interval_minutes: Number($('#f-interval').value || 360),
+    interval_minutes: readInterval('f-interval'),
     scope: $('#f-scope').value,
     max_depth: Number($('#f-depth').value || 2),
     max_assets: Number($('#f-assets').value || 400),
@@ -2281,9 +2323,16 @@ async function handleAction(el, evt) {
   }
   if (act === 'save-target') return saveTarget(el.dataset.id || null);
   if (act === 'edit-target') {
-    const t = (state.cache.targets || []).find((x) => String(x.id) === el.dataset.id);
-    if (t) openTargetModal(t);
-    return;
+    let t = (state.cache.targets || []).find((x) => String(x.id) === el.dataset.id);
+    if (!t) {
+      // 缓存里没有（比如刚翻过页）就回源查一次, 别让按钮点了没反应
+      try {
+        const data = await api('/api/targets?limit=0');
+        t = (data.items || []).find((x) => String(x.id) === el.dataset.id);
+      } catch (err) { /* 下面统一提示 */ }
+    }
+    if (!t) { toast('没找到该站点，刷新页面后再试', 'err'); return; }
+    return openTargetModal(t);
   }
   if (act === 'scan') {
     el.disabled = true;
@@ -2474,7 +2523,7 @@ async function handleAction(el, evt) {
     return runBulk(op);
   }
   if (act === 'targets-bulk-save-interval') {
-    const minutes = Number($('#bulk-interval').value || 1440);
+    const minutes = readInterval('bulk-interval');
     closeModal();
     return runBulk('interval', { interval_minutes: minutes });
   }

@@ -142,6 +142,11 @@ select { appearance: none; background-image: none; cursor: pointer; }
 label.field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim); }
 .field-plain { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim); }
 
+/* 巡检周期: 数字 + 单位（分钟/小时/天/周） */
+.interval-row { display: flex; gap: 6px; }
+.interval-row input { flex: 1 1 auto; }
+.interval-row select { flex: 0 0 auto; width: auto; min-width: 78px; }
+
 /* 输入框 + 右侧箭头弹出的候选列表（一个框，不做成"输入框 + 下拉框"两个控件） */
 .combo { position: relative; }
 .combo input { padding-right: 28px; }
