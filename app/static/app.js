@@ -650,7 +650,7 @@ function openBulkAddModal() {
     <div class="modal-body">
       <label class="field">站点清单
         <textarea id="bulk-urls" rows="8" placeholder="每行一个, 支持域名或完整 URL&#10;example.com&#10;https://a.example.com/app&#10;# 以 # 开头的行会被忽略"></textarea>
-        <span class="field-hint">自动补 https://，按主机名去重（批内与已有站点都比对），已存在的站点会跳过，单次最多 5000 个。</span>
+        <span class="field-hint">自动补 https://；<b>同一主机只建一条</b>，批内重复与已存在的都会跳过并在结果里列出来；单次最多 5000 个。</span>
       </label>
       <div>
         <input type="file" id="bulk-file" data-act="bulk-add-file" accept=".txt,.csv,text/plain" hidden>
@@ -682,18 +682,22 @@ function openBulkAddModal() {
 }
 
 function bulkAddSummary(r) {
-  const label = { created: '新增', skipped: '跳过', invalid: '无效' };
-  const parts = ['created', 'skipped', 'invalid']
+  const label = { created: '新增', duplicate: '重复', skipped: '已存在', invalid: '无效' };
+  const parts = ['created', 'duplicate', 'skipped', 'invalid']
     .map((key) => `<span class="tag${key === 'created' && r[key] ? ' tag-ok' : ''}">${label[key]} ${r[key]}</span>`)
     .join(' ');
-  const detail = [...(r.skipped_detail || []), ...(r.invalid_detail || [])];
+  const detail = [
+    ...(r.duplicate_detail || []).map((d) => ({ text: d.line, reason: `与「${d.same_as}」同一主机，只保留一条` })),
+    ...(r.skipped_detail || []).map((d) => ({ text: d.url, reason: d.reason })),
+    ...(r.invalid_detail || []).map((d) => ({ text: d.line, reason: d.reason })),
+  ];
   return `
     <div class="list-row" style="align-items:flex-start;gap:10px;padding-top:4px">
-      <span class="grow"><b>本次导入结果</b> <span class="muted">· 跳过与无效的条目最多列 50 条</span></span>
+      <span class="grow"><b>本次导入结果</b> <span class="muted">· 重复/已存在/无效的条目最多各列 50 条${r.ignored ? `；另有 ${r.ignored} 行空行或注释已忽略` : ''}</span></span>
       <span class="nowrap">${parts}</span>
     </div>
     ${detail.length ? `<div class="mono muted" style="font-size:11.5px;max-height:150px;overflow:auto">
-      ${detail.map((d) => `${esc(d.url || d.line)} — ${esc(d.reason)}`).join('<br>')}</div>` : ''}`;
+      ${detail.map((d) => `${esc(d.text)} — ${esc(d.reason)}`).join('<br>')}</div>` : ''}`;
 }
 
 async function runBulkAdd() {
@@ -714,7 +718,8 @@ async function runBulkAdd() {
       }),
     });
     $('#bulk-add-result').innerHTML = bulkAddSummary(r);
-    const extra = [r.skipped ? `跳过 ${r.skipped} 个` : '', r.invalid ? `忽略无效 ${r.invalid} 行` : '']
+    const extra = [r.duplicate ? `重复 ${r.duplicate} 行` : '', r.skipped ? `跳过 ${r.skipped} 个` : '',
+                   r.invalid ? `忽略无效 ${r.invalid} 行` : '']
       .filter(Boolean).join('，');
     toast(`已新增 ${r.created} 个站点${extra ? '，' + extra : ''}`, r.created ? 'ok' : 'err');
     const foot = $('.modal-foot');

@@ -241,6 +241,11 @@ def test_targets_bulk_import(client) -> None:
     assert body["created"] == 1
     assert body["invalid"] == 2
     assert {d["line"] for d in body["invalid_detail"]} == {"example.com 备注", "http://"}
+    # 批内重复必须报出来, 否则用户只看到"少了 N 条"却不知道为什么
+    assert body["duplicate"] == 1
+    assert body["duplicate_detail"][0]["host"] == "imp-a.test"
+    assert body["duplicate_detail"][0]["same_as"] == "imp-a.test"
+    assert body["ignored"] == 2      # 注释行 + 空行
     created = body["items"][0]
     assert created["base_url"] == "https://imp-a.test"  # 自动补协议
 

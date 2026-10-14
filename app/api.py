@@ -482,11 +482,14 @@ def import_targets(payload: TargetImportIn) -> dict[str, Any]:
     if payload.text:
         raw.extend(payload.text.splitlines())
     candidates: list[str] = []
-    seen: set[str] = set()
+    seen: dict[str, str] = {}          # host → 第一次出现的原始行, 用来解释"为什么这行没导入"
     invalid: list[dict[str, str]] = []
+    duplicates: list[dict[str, str]] = []
+    ignored = 0
     for line in raw:
         item = (line or "").strip()
         if not item or item.startswith("#"):
+            ignored += 1
             continue
         if any(ch.isspace() for ch in item):
             # 一行里塞了备注/多列的 CSV 常见于此, 直接当作无效而不是造出一个假地址
@@ -499,8 +502,10 @@ def import_targets(payload: TargetImportIn) -> dict[str, Any]:
             continue
         host = urlparse(url).netloc.lower()
         if host in seen:
+            # 同一主机只有一条监测目标, 重复行要报出来, 否则用户只会看到"少了 35 条"
+            duplicates.append({"line": item[:200], "host": host, "same_as": seen[host]})
             continue
-        seen.add(host)
+        seen[host] = item[:200]
         candidates.append(url)
     if len(candidates) > MAX_BULK_IMPORT:
         raise HTTPException(400, f"单次最多导入 {MAX_BULK_IMPORT} 个站点, 本次解析出 {len(candidates)} 个")
@@ -525,10 +530,15 @@ def import_targets(payload: TargetImportIn) -> dict[str, Any]:
         existing.add(host)
         created.append({"id": int(tid or 0), "name": host, "base_url": url})
     invalidate_dash_cache()
-    db.log_event(f"批量导入站点: 新增 {len(created)} 个, 跳过 {len(skipped)} 个, 无效 {len(invalid)} 条",
-                 kind="target")
+    db.log_event(
+        f"批量导入站点: 新增 {len(created)} 个, 重复 {len(duplicates)} 行, "
+        f"跳过 {len(skipped)} 个, 无效 {len(invalid)} 条",
+        kind="target",
+    )
     return {"created": len(created), "skipped": len(skipped), "invalid": len(invalid),
-            "items": created, "skipped_detail": skipped[:50], "invalid_detail": invalid[:50]}
+            "duplicate": len(duplicates), "ignored": ignored,
+            "items": created, "skipped_detail": skipped[:50], "invalid_detail": invalid[:50],
+            "duplicate_detail": duplicates[:50]}
 
 
 @app.post("/api/targets/scan-batch")
