@@ -267,6 +267,17 @@ tbody tr:hover td.sticky-r { background: #171d25; }
   border-radius: 3px; font-size: 11px; background: var(--panel-2);
   border: 1px solid var(--line); color: var(--text-dim);
 }
+/* 带悬停说明的状态标签(失败 / 部分成功): 光标变成 help, 悬停显示失败原因 */
+.tag-tip { cursor: help; }
+/* 悬停说明气泡: 由 app.js 按元素位置贴着显示, 内容里的换行会原样保留 */
+.tipbox {
+  position: fixed; z-index: 70; max-width: 460px;
+  background: #1b212a; border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 8px 11px;
+  font-size: 12px; line-height: 1.55; color: var(--text-dim);
+  white-space: pre-line; pointer-events: none;
+  box-shadow: 0 12px 30px rgba(0,0,0,.5);
+}
 .tag-ok { color: #7de0d2; border-color: #1e4d48; background: #122a29; }
 .tag-run { color: #a9c8ff; border-color: #24406b; background: #14213a; }
 .tag-warn { color: #f3d987; border-color: #4d4420; background: #2b2612; }

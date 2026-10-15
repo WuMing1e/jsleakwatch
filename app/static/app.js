@@ -202,6 +202,41 @@ function toast(message, kind) {
   setTimeout(() => el.remove(), 4200);
 }
 
+/* 悬停说明气泡: 元素带 data-tip 时, 悬停就把它贴在元素下方显示(放不下就翻到上方)。
+   用 fixed 定位, 所以不会把表格行撑开; 内容里的换行由 CSS 的 pre-line 保留。 */
+function hideTip() {
+  const box = $('#tipbox');
+  if (!box || box.hidden) return;
+  box.hidden = true;
+  box.textContent = '';
+}
+
+function showTip(host) {
+  const box = $('#tipbox');
+  if (!box) return;
+  box.textContent = host.dataset.tip;
+  box.hidden = false;
+  const r = host.getBoundingClientRect();
+  const b = box.getBoundingClientRect();
+  const left = Math.max(10, Math.min(r.left + r.width / 2 - b.width / 2, window.innerWidth - b.width - 10));
+  let top = r.bottom + 8;
+  if (top + b.height > window.innerHeight - 10) top = Math.max(10, r.top - b.height - 8);
+  box.style.left = `${Math.round(left)}px`;
+  box.style.top = `${Math.round(top)}px`;
+}
+
+document.addEventListener('mouseover', (event) => {
+  const el = event.target.closest('[data-tip]');
+  if (el && !el.contains(event.relatedTarget)) showTip(el);
+});
+
+document.addEventListener('mouseout', (event) => {
+  const el = event.target.closest('[data-tip]');
+  if (el && !el.contains(event.relatedTarget)) hideTip();
+});
+
+window.addEventListener('scroll', hideTip, true);
+
 /* ------------------------------------------------------------------ 状态 */
 
 const state = {
@@ -413,12 +448,36 @@ function targetStatusTag(t) {
   if (t.scanning) return '<span class="tag tag-run">扫描中</span>';
   if (t.queued) return '<span class="tag tag-run">排队中</span>';
   if (!t.enabled) return '<span class="tag">已暂停</span>';
-  if (t.last_status === 'failed') return '<span class="tag tag-err">失败</span>';
-  if (t.last_status === 'partial') return '<span class="tag tag-warn">部分成功</span>';
+  // 失败/部分成功把原因挂成悬停提示: 鼠标停在标签上就能看到这次扫描为什么没成
+  const reason = (t.last_error || '').trim();
+  const tip = reason ? ` data-tip="${esc(statusTip(t, reason))}"` : '';
+  const mark = tip ? ' tag-tip' : '';
+  if (t.last_status === 'failed') return `<span class="tag tag-err${mark}"${tip}>失败</span>`;
+  if (t.last_status === 'partial') return `<span class="tag tag-warn${mark}"${tip}>部分成功</span>`;
   if (t.last_status === 'ok') return '<span class="tag tag-ok">正常</span>';
   return '<span class="tag">待扫描</span>';
 }
 
+/* 悬停提示的文案: 原因 + 连续失败次数 + 最近一次扫描时间 */
+function statusTip(t, reason) {
+  // 原始 last_error 可能是几十条资产错误用 "; " 拼起来的, 取前三条并去掉重复的主机名
+  const parts = reason.split(/;\s*/).map((s) => {
+    const line = s.trim();
+    if (!line) return "";
+    // "https://站点/路径.js: ConnectTimeout: " → "路径.js: ConnectTimeout:"; 入口页显示成"入口页面"
+    const [loc, ...tail] = line.split(/: /);
+    const path = loc.replace(/^https?:\/\/[^\s/]+/, "").replace(/\/$/, "");
+    const label = path || "入口页面";
+    return tail.length ? `${label}: ${tail.join(": ").trim()}` : label;
+  }).filter(Boolean);
+  const bits = parts.slice(0, 3);
+  if (parts.length > bits.length) bits.push(`…… 另有 ${parts.length - bits.length} 条错误`);
+  const failures = Number(t.consecutive_failures || 0);
+  if (failures > 1) bits.push(`已连续失败 ${failures} 次`);
+  if (t.last_scan_at) bits.push(`最近一次扫描 ${fmtTime(t.last_scan_at)}`);
+  bits.push('可在站点详情里改入口地址或手动重试');
+  return bits.join('\n');
+}
 function externalToolsCard(info) {
   if (!info) return '';
   const tools = Object.keys(info.external_tools || {});
@@ -2230,6 +2289,7 @@ function renderActions(path) {
 
 async function render() {
   const { path, query } = parseHash();
+  hideTip();  // 重渲染会把旧的悬停目标换掉, 先收起说明气泡
   // 离开发现页时收起详情抽屉; 发现页内部的刷新保持打开
   if (path !== 'findings' || (!query.finding && !state.openFindingId)) closeDrawer();
   const [title, sub] = TITLES[path] || TITLES.overview;
