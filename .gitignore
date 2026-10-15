@@ -22,7 +22,12 @@ outputs/screenshots/
 # 针对具体目标的评估报告(可随时用 tools/coverage.py 重新生成, 不带上云)
 outputs/reports/
 
+# 资产收集结果: 一份完整的内外部主机清单, 留在本机即可
+# (要纳入版本管理就删掉这一行)
+outputs/assets/
+
 # 临时文件
 work/*.log
+work/dns-cache.json
 *.log
 .DS_Store
