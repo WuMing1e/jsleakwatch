@@ -1744,11 +1744,13 @@ async function renderSettings() {
             <label class="field">全局并发请求数<input type="number" id="s-conc" min="1" max="32" value="${esc(scan.max_concurrency)}"></label>
             <label class="field">单站请求间隔 (毫秒)<input type="number" id="s-delay" min="0" max="5000" value="${esc(scan.per_host_delay_ms)}"></label>
           </div>
-          <div class="form-row-3">
+          <div class="form-row-4">
             <label class="field">请求超时 (秒)<input type="number" id="s-timeout" min="3" max="120" value="${esc(scan.timeout_seconds)}"></label>
+            <label class="field">失败重试次数<input type="number" id="s-retries" min="0" max="3" value="${esc(scan.max_retries ?? 1)}"></label>
             <label class="field">单站资产上限<input type="number" id="s-maxassets" min="1" max="5000" value="${esc(scan.max_assets_per_scan)}"></label>
             <label class="field">页面递归深度<input type="number" id="s-depth" min="0" max="4" value="${esc(scan.max_depth)}"></label>
           </div>
+          <div class="field-hint">重试只作用于「连接没建立起来」和「连接被中途掐断」，站点自己响应慢不重试。</div>
           <label class="field">User-Agent<input type="text" id="s-ua" value="${esc(scan.user_agent)}"></label>
           <label class="field">代理地址 (可选)<input type="text" id="s-proxy" placeholder="http://127.0.0.1:8080" value="${esc(scan.proxy || '')}"></label>
           <div class="form-row">
@@ -2118,6 +2120,7 @@ async function saveScanSettings() {
       max_concurrency: Number($('#s-conc').value),
       per_host_delay_ms: Number($('#s-delay').value),
       timeout_seconds: Number($('#s-timeout').value),
+      max_retries: Number($('#s-retries').value || 0),
       max_assets_per_scan: Number($('#s-maxassets').value),
       max_depth: Number($('#s-depth').value),
       user_agent: $('#s-ua').value,

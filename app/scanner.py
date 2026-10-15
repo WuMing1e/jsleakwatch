@@ -62,6 +62,7 @@ def scan_config_from_settings(overrides: dict[str, Any] | None = None) -> ScanCo
     cfg = ScanConfig(
         user_agent=SETTINGS.scan.user_agent,
         timeout_seconds=SETTINGS.scan.timeout_seconds,
+        max_retries=SETTINGS.scan.max_retries,
         max_concurrency=SETTINGS.scan.max_concurrency,
         per_host_delay_ms=SETTINGS.scan.per_host_delay_ms,
         max_assets_per_scan=SETTINGS.scan.max_assets_per_scan,

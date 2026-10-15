@@ -230,3 +230,80 @@ def test_headless_render_finds_runtime_only_addresses(prepared) -> None:
             "运行时才发起的接口地址应由渲染补出来"
     finally:
         db.set_setting("scan", previous)
+
+
+# ------------------------------------------------------------ 抓取重试
+
+class _FakeResponse:
+    status_code = 200
+    headers = {"content-type": "application/javascript"}
+    content = b"var a = 1;"
+    encoding = "utf-8"
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+
+class _FlakyClient:
+    """前 N 次抛异常, 之后返回响应: 用来验证"抖动→重试→成功"这条路。"""
+
+    def __init__(self, failures: int, exc: Exception) -> None:
+        self.failures = failures
+        self.exc = exc
+        self.calls = 0
+
+    async def get(self, url: str):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.exc
+        return _FakeResponse(url)
+
+
+def _fetch_with(client, retries: int):
+    import asyncio
+
+    import httpx
+
+    from app.config import ScanConfig
+    from app.fetcher import Fetcher
+
+    fetcher = Fetcher(ScanConfig(max_retries=retries, per_host_delay_ms=0))
+    fetcher._client = client
+    return asyncio.run(fetcher.get("http://example.test/a.js")), fetcher
+
+
+def test_transient_connect_timeout_is_retried_once() -> None:
+    """一次连接超时不该让站点变成"部分成功": 重试一次应当拿到内容。"""
+    import httpx
+
+    result, fetcher = _fetch_with(_FlakyClient(1, httpx.ConnectTimeout("连接超时")), retries=1)
+    assert result.ok and result.text == "var a = 1;"
+    assert fetcher.requests_made == 1
+
+
+def test_read_timeout_is_not_retried() -> None:
+    """站点自己响应慢就别重试了, 否则整轮扫描更久。"""
+    import httpx
+
+    client = _FlakyClient(99, httpx.ReadTimeout("响应超时"))
+    result, _ = _fetch_with(client, retries=1)
+    assert not result.ok and result.error.startswith("ReadTimeout")
+    assert client.calls == 1
+
+
+def test_retry_gives_up_and_reports_last_error() -> None:
+    import httpx
+
+    client = _FlakyClient(99, httpx.ConnectTimeout("连接超时"))
+    result, _ = _fetch_with(client, retries=1)
+    assert not result.ok and result.error.startswith("ConnectTimeout")
+    assert client.calls == 2, "重试一次即放弃"
+
+
+def test_retries_can_be_turned_off() -> None:
+    import httpx
+
+    client = _FlakyClient(99, httpx.ConnectTimeout("连接超时"))
+    result, _ = _fetch_with(client, retries=0)
+    assert not result.ok
+    assert client.calls == 1

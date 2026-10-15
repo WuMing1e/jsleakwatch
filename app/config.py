@@ -35,6 +35,7 @@ class ScanConfig:
 
     user_agent: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
     timeout_seconds: float = 15.0
+    max_retries: int = 1               # 连接类失败(连接超时/被掐断)的重试次数, 0 = 不重试
     max_concurrency: int = 6           # 全局并发请求数
     per_host_delay_ms: int = 350       # 同一站点请求间隔, 做基本的礼貌限速
     max_assets_per_scan: int = 400    # 单次扫描最多抓取的 JS 资产数

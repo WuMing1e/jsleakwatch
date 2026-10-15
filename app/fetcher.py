@@ -11,6 +11,11 @@ import httpx
 from .config import ScanConfig
 
 
+# 只有"连接根本没建立起来"这一类才值得重试; 响应超时是站点自己慢, 重试只会拖长扫描。
+RETRYABLE_ERRORS = frozenset({"ConnectTimeout", "ConnectError", "PoolTimeout", "RemoteProtocolError"})
+RETRY_BACKOFF_S = 0.6
+
+
 @dataclass
 class FetchResult:
     url: str
@@ -104,36 +109,49 @@ class Fetcher:
     async def get(self, url: str, allow_any_type: bool = False) -> FetchResult:
         assert self._client is not None, "Fetcher 需在 async with 中使用"
         host = urlparse(url).netloc.lower()
-        async with self._sem:
-            await self._throttle(host)
-            try:
-                resp = await self._client.get(url)
-            except Exception as exc:  # noqa: BLE001 - 单资产失败不应中断整轮扫描
-                return FetchResult(url, url, 0, "", "", 0, error=f"{type(exc).__name__}: {exc}"[:200])
-            self.requests_made += 1
-            ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-            body = resp.content
-            truncated = False
-            if len(body) > self.cfg.max_asset_bytes:
-                body = body[: self.cfg.max_asset_bytes]
-                truncated = True
+        attempts = max(1, int(self.cfg.max_retries) + 1)
+        resp, error = None, ""
+        for attempt in range(attempts):
+            async with self._sem:
+                await self._throttle(host)
+                try:
+                    resp = await self._client.get(url)
+                except Exception as exc:  # noqa: BLE001 - 单资产失败不应中断整轮扫描
+                    resp, error = None, f"{type(exc).__name__}: {exc}"[:200]
+            if resp is not None:
+                break
+            # 连接根本没建立起来多半是网络抖动, 歇一下再试一次往往就过了;
+            # 响应超时(ReadTimeout)不重试 —— 那是站点自己慢, 再来一轮只会让扫描更久。
+            if error.split(":", 1)[0].strip() not in RETRYABLE_ERRORS:
+                break
+            if attempt + 1 < attempts:
+                await asyncio.sleep(RETRY_BACKOFF_S * (attempt + 1))
+        if resp is None:
+            return FetchResult(url, url, 0, "", "", 0, error=error)
+        self.requests_made += 1
+        ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+        body = resp.content
+        truncated = False
+        if len(body) > self.cfg.max_asset_bytes:
+            body = body[: self.cfg.max_asset_bytes]
+            truncated = True
 
-            if not allow_any_type and looks_binary(body):
-                return FetchResult(url, str(resp.url), resp.status_code, ctype, "", len(resp.content),
-                                   truncated=truncated, error="binary")
+        if not allow_any_type and looks_binary(body):
+            return FetchResult(url, str(resp.url), resp.status_code, ctype, "", len(resp.content),
+                               truncated=truncated, error="binary")
 
-            charset = resp.encoding or "utf-8"
-            try:
-                text = body.decode(charset, errors="replace")
-            except (LookupError, UnicodeDecodeError):
-                text = body.decode("utf-8", errors="replace")
-            self.bytes_fetched += len(body)
-            return FetchResult(
-                url=url,
-                final_url=str(resp.url),
-                status=resp.status_code,
-                content_type=ctype,
-                text=text,
-                size=len(resp.content),
-                truncated=truncated,
-            )
+        charset = resp.encoding or "utf-8"
+        try:
+            text = body.decode(charset, errors="replace")
+        except (LookupError, UnicodeDecodeError):
+            text = body.decode("utf-8", errors="replace")
+        self.bytes_fetched += len(body)
+        return FetchResult(
+            url=url,
+            final_url=str(resp.url),
+            status=resp.status_code,
+            content_type=ctype,
+            text=text,
+            size=len(resp.content),
+            truncated=truncated,
+        )
