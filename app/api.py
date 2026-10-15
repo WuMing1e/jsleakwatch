@@ -513,32 +513,38 @@ def import_targets(payload: TargetImportIn) -> dict[str, Any]:
     existing = {urlparse(row["base_url"]).netloc.lower() for row in db.query("SELECT base_url FROM targets")}
     created: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
+    failed: list[dict[str, str]] = []
     now = db.utcnow()
     for url in candidates:
         host = urlparse(url).netloc.lower()
         if host in existing:
             skipped.append({"url": url, "reason": "已存在"})
             continue
-        tid = db.execute(
-            "INSERT INTO targets(name, base_url, enabled, interval_minutes, scope, max_depth, max_assets, "
-            "include_sourcemaps, probe_common_config, tags, notes, created_at, next_scan_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (host, url, 1 if payload.enabled else 0, payload.interval_minutes, "same-origin",
-             payload.max_depth, payload.max_assets, 1, 1 if payload.probe_common_config else 0,
-             "", payload.notes, now, now),
-        ).lastrowid
+        try:
+            tid = db.execute(
+                "INSERT INTO targets(name, base_url, enabled, interval_minutes, scope, max_depth, max_assets, "
+                "include_sourcemaps, probe_common_config, tags, notes, created_at, next_scan_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (host, url, 1 if payload.enabled else 0, payload.interval_minutes, "same-origin",
+                 payload.max_depth, payload.max_assets, 1, 1 if payload.probe_common_config else 0,
+                 "", payload.notes, now, now),
+            ).lastrowid
+        except Exception as exc:  # noqa: BLE001 - 单条失败不能连累整批
+            failed.append({"url": url, "reason": f"{type(exc).__name__}: {exc}"[:160]})
+            continue
         existing.add(host)
         created.append({"id": int(tid or 0), "name": host, "base_url": url})
     invalidate_dash_cache()
     db.log_event(
         f"批量导入站点: 新增 {len(created)} 个, 重复 {len(duplicates)} 行, "
-        f"跳过 {len(skipped)} 个, 无效 {len(invalid)} 条",
+        f"跳过 {len(skipped)} 个, 无效 {len(invalid)} 条"
+        + (f", 失败 {len(failed)} 个" if failed else ""),
         kind="target",
     )
     return {"created": len(created), "skipped": len(skipped), "invalid": len(invalid),
-            "duplicate": len(duplicates), "ignored": ignored,
+            "duplicate": len(duplicates), "ignored": ignored, "failed": len(failed),
             "items": created, "skipped_detail": skipped[:50], "invalid_detail": invalid[:50],
-            "duplicate_detail": duplicates[:50]}
+            "duplicate_detail": duplicates[:50], "failed_detail": failed[:50]}
 
 
 @app.post("/api/targets/scan-batch")

@@ -682,21 +682,27 @@ function openBulkAddModal() {
 }
 
 function bulkAddSummary(r) {
-  const label = { created: '新增', duplicate: '重复', skipped: '已存在', invalid: '无效' };
-  const parts = ['created', 'duplicate', 'skipped', 'invalid']
-    .map((key) => `<span class="tag${key === 'created' && r[key] ? ' tag-ok' : ''}">${label[key]} ${r[key]}</span>`)
+  const label = { created: '新增', duplicate: '重复', skipped: '已存在', invalid: '无效', failed: '失败' };
+  const parts = ['created', 'duplicate', 'skipped', 'invalid', 'failed']
+    .filter((key) => key !== 'failed' || r.failed)
+    .map((key) => {
+      const tone = key === 'created' && r[key] ? ' tag-ok' : (key === 'failed' ? ' tag-err' : '');
+      return `<span class="tag${tone}">${label[key]} ${r[key]}</span>`;
+    })
     .join(' ');
   const detail = [
+    ...(r.failed_detail || []).map((d) => ({ text: d.url, reason: `添加失败 — ${d.reason}` })),
     ...(r.duplicate_detail || []).map((d) => ({ text: d.line, reason: `与「${d.same_as}」同一主机，只保留一条` })),
     ...(r.skipped_detail || []).map((d) => ({ text: d.url, reason: d.reason })),
     ...(r.invalid_detail || []).map((d) => ({ text: d.line, reason: d.reason })),
   ];
+  const total = (r.created || 0) + (r.duplicate || 0) + (r.skipped || 0) + (r.invalid || 0) + (r.failed || 0);
   return `
     <div class="list-row" style="align-items:flex-start;gap:10px;padding-top:4px">
-      <span class="grow"><b>本次导入结果</b> <span class="muted">· 重复/已存在/无效的条目最多各列 50 条${r.ignored ? `；另有 ${r.ignored} 行空行或注释已忽略` : ''}</span></span>
+      <span class="grow"><b>本次导入结果</b> <span class="muted">· 共处理 ${total} 条，失败/重复/已存在/无效最多各列 50 条${r.ignored ? `；另有 ${r.ignored} 行空行或注释已忽略` : ''}</span></span>
       <span class="nowrap">${parts}</span>
     </div>
-    ${detail.length ? `<div class="mono muted" style="font-size:11.5px;max-height:150px;overflow:auto">
+    ${detail.length ? `<div class="mono muted" style="font-size:11.5px;max-height:170px;overflow:auto">
       ${detail.map((d) => `${esc(d.text)} — ${esc(d.reason)}`).join('<br>')}</div>` : ''}`;
 }
 
@@ -718,10 +724,11 @@ async function runBulkAdd() {
       }),
     });
     $('#bulk-add-result').innerHTML = bulkAddSummary(r);
-    const extra = [r.duplicate ? `重复 ${r.duplicate} 行` : '', r.skipped ? `跳过 ${r.skipped} 个` : '',
-                   r.invalid ? `忽略无效 ${r.invalid} 行` : '']
+    const extra = [r.duplicate ? `重复 ${r.duplicate} 行` : '', r.skipped ? `已存在 ${r.skipped} 个` : '',
+                   r.invalid ? `无效 ${r.invalid} 行` : '', r.failed ? `失败 ${r.failed} 个` : '']
       .filter(Boolean).join('，');
-    toast(`已新增 ${r.created} 个站点${extra ? '，' + extra : ''}`, r.created ? 'ok' : 'err');
+    toast(`已新增 ${r.created} 个站点${extra ? '，' + extra : ''}`,
+          r.failed || !r.created ? 'err' : 'ok');
     const foot = $('.modal-foot');
     if (foot && !foot.dataset.done) {
       foot.dataset.done = '1';

@@ -266,6 +266,30 @@ def test_targets_bulk_import(client) -> None:
     assert client.delete(f"/api/targets/{created['id']}").status_code == 200
 
 
+def test_bulk_import_reports_failed_lines_without_aborting(client, monkeypatch) -> None:
+    """单条写入失败要记进"失败"并继续导入其余站点, 不能整批 500。"""
+    from app import api, db
+
+    real_execute = db.execute
+
+    def flaky(sql, params=()):
+        if "INSERT INTO targets" in sql and params and str(params[1]).startswith("https://bad-"):
+            raise RuntimeError("database is locked")
+        return real_execute(sql, params)
+
+    monkeypatch.setattr(api.db, "execute", flaky)
+    text = "\n".join(["imp-ok-1.test", "bad-host.test", "imp-ok-2.test"])
+    res = client.post("/api/targets/import", json={"text": text})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["created"] == 2, f"其余站点应照常创建: {body}"
+    assert body["failed"] == 1
+    assert body["failed_detail"][0]["url"] == "https://bad-host.test"
+    assert "database is locked" in body["failed_detail"][0]["reason"]
+    for item in body["items"]:
+        client.delete(f"/api/targets/{item['id']}")
+
+
 def test_rules_endpoint_and_toggle(client) -> None:
     body = client.get("/api/rules").json()
     assert body["items"] and body["revision"] >= 1
