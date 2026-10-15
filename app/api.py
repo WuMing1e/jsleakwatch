@@ -586,6 +586,8 @@ async def bulk_targets(payload: TargetBulkIn) -> dict[str, Any]:
     marks = ",".join("?" * len(ids))
     if action == "delete":
         db.query_one(f"SELECT COUNT(*) c FROM targets WHERE id IN ({marks})", ids)  # 校验存在
+        for tid in ids:                       # 在跑的扫描一并取消, 别留下"幽灵扫描"
+            SCHEDULER.cancel_target(int(tid))
         db.execute(f"DELETE FROM targets WHERE id IN ({marks})", ids)
         affected = len(ids)
     elif action in ("enable", "disable"):
@@ -639,9 +641,12 @@ def update_target(tid: int, payload: TargetPatch) -> dict[str, Any]:
 def delete_target(tid: int) -> dict[str, Any]:
     invalidate_dash_cache()
     target = _target_row(tid)
+    # 先取消在跑的扫描: 否则删掉的站点还会继续抓、继续推告警
+    cancelled = SCHEDULER.cancel_target(tid)
     db.execute("DELETE FROM targets WHERE id=?", (tid,))
-    db.log_event(f"删除监测站点 {target['name']}", kind="target")
-    return {"deleted": tid}
+    db.log_event(f"删除监测站点 {target['name']}" + ("（同时取消了正在进行的扫描）" if cancelled else ""),
+                 kind="target")
+    return {"deleted": tid, "scan_cancelled": cancelled}
 
 
 @app.post("/api/targets/{tid}/scan")

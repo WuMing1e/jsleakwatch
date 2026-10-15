@@ -33,6 +33,7 @@ def scheduler_config() -> dict[str, int]:
 @dataclass
 class SchedulerState:
     running: dict[int, str] = field(default_factory=dict)   # target_id -> 开始时间
+    tasks: dict[int, "asyncio.Task[None]"] = field(default_factory=dict)  # 便于取消在跑的扫描
     queued: list[dict[str, Any]] = field(default_factory=list)
     last_tick: str = ""
     scans_completed: int = 0
@@ -124,6 +125,20 @@ class Scheduler:
         self._queue.put_nowait((target, full))
         return True
 
+    def cancel_target(self, target_id: int) -> bool:
+        """停掉某个站点正在跑的扫描（站点被删除时调用）。
+
+        不取消的话，删掉的站点还会继续抓几十分钟、写完日志再推一条飞书告警 ——
+        实测删掉站点后 7 秒还收到了它的扫描完成事件与告警。
+        """
+        tid = int(target_id)
+        self.state.queued = [t for t in self.state.queued if int(t["id"]) != tid]
+        task = self.state.tasks.get(tid)
+        if task is not None and not task.done():
+            task.cancel()
+            return True
+        return False
+
     # ------------------------------------------------------- 工作线程
     async def _worker(self, index: int) -> None:
         while True:
@@ -132,6 +147,9 @@ class Scheduler:
                 tid = int(target["id"])
                 self.state.queued = [t for t in self.state.queued if int(t["id"]) != tid]
                 self.state.running[tid] = db.utcnow()
+                current = asyncio.current_task()
+                if current is not None:
+                    self.state.tasks[tid] = current
                 try:
                     result = await scan_target(target, full=full)
                     self.state.scans_completed += 1
@@ -144,6 +162,11 @@ class Scheduler:
                     }
                     await self._after_scan(target, result)
                 except asyncio.CancelledError:
+                    db.execute("UPDATE scans SET status='failed', error=?, finished_at=? "
+                               "WHERE target_id=? AND status='running'",
+                               ("扫描已取消(站点被删除)", db.utcnow(), tid))
+                    db.log_event(f"扫描已取消: {target.get('name')}", kind="scan", level="warn",
+                                 target_id=tid)
                     raise
                 except Exception as exc:  # noqa: BLE001
                     db.log_event(
@@ -151,6 +174,7 @@ class Scheduler:
                         target_id=tid,
                     )
                 finally:
+                    self.state.tasks.pop(tid, None)
                     self.state.running.pop(tid, None)
                     self._queue.task_done()
 

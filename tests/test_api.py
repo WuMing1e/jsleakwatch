@@ -175,6 +175,17 @@ def test_finding_delete_and_bulk_delete(client) -> None:
     client.delete(f"/api/targets/{target['id']}")  # 级联清掉剩下的发现
 
 
+def test_cancel_target_drops_queued_scan() -> None:
+    """删除站点要能把它排在队列里的扫描一起撤掉（否则会出现"幽灵扫描"）。"""
+    from app.scheduler import Scheduler
+
+    sched = Scheduler()
+    sched.state.queued.append({"id": 4242, "name": "queued"})
+    assert sched.cancel_target(4242) is False          # 没有正在跑的任务
+    assert sched.state.queued == [], "队列里的站点应被移除"
+    assert sched.cancel_target(999999) is False        # 不存在的站点不报错
+
+
 def test_findings_reuse_across_sites(client) -> None:
     """同一命中值出现在多个站点时, 列表要标出复用站点数, 详情要能互相跳。"""
     from app import db
