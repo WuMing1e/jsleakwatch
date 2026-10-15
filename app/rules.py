@@ -419,7 +419,9 @@ RULE_INDEX: dict[str, Rule] = {r.id: r for r in RULES}
 
 # ---------------------------------------------------------------- 扫描引擎
 
-MAX_SCAN_BYTES = 8_000_000
+# 单份文本最多扫多少字节; 0 = 不限制。默认不限制: 大 bundle 里照样可能藏着密钥,
+# 截掉尾巴等于漏检。真嫌慢可以在构造 Detector 时传一个上限。
+MAX_SCAN_BYTES = 0
 
 _NEWLINE_RE = re.compile("\n")
 
@@ -513,7 +515,9 @@ class Detector:
         severity_override: dict[str, str] | None = None,
         allowlist: Iterable[str] = (),
         custom_rules: Iterable[Rule] = (),
+        max_scan_bytes: int | None = None,
     ) -> None:
+        self.max_scan_bytes = MAX_SCAN_BYTES if max_scan_bytes is None else max(0, max_scan_bytes)
         disabled_set = set(disabled)
         enabled_set = set(enabled)
         overrides = severity_override or {}
@@ -564,8 +568,8 @@ class Detector:
     ) -> list[Detection]:
         if not text:
             return []
-        if len(text) > MAX_SCAN_BYTES:
-            text = text[:MAX_SCAN_BYTES]
+        if self.max_scan_bytes and len(text) > self.max_scan_bytes:
+            text = text[: self.max_scan_bytes]
         lowered = text.lower()
         # 行号用"换行符位置表 + 二分"算: 以前每条命中都 text.count("\n") 一遍,
         # 大文件上成千上万条命中时这一项就吃掉两成检测耗时

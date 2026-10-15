@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 import httpx
@@ -30,6 +31,18 @@ class FetchResult:
     @property
     def ok(self) -> bool:
         return self.status == 200 and not self.error
+
+
+class _RawBody(NamedTuple):
+    """一次请求拿到的东西(还没解码成文本)。"""
+
+    status: int
+    final_url: str
+    encoding: str
+    content_type: str
+    body: bytes
+    size: int          # 文件真实大小(能拿到 Content-Length 时用它, 否则是用实际收到的字节数)
+    truncated: bool
 
 
 def looks_binary(data: bytes) -> bool:
@@ -115,7 +128,7 @@ class Fetcher:
             async with self._sem:
                 await self._throttle(host)
                 try:
-                    resp = await self._client.get(url)
+                    resp = await self._request(url)
                 except Exception as exc:  # noqa: BLE001 - 单资产失败不应中断整轮扫描
                     resp, error = None, f"{type(exc).__name__}: {exc}"[:200]
             if resp is not None:
@@ -129,29 +142,47 @@ class Fetcher:
         if resp is None:
             return FetchResult(url, url, 0, "", "", 0, error=error)
         self.requests_made += 1
-        ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-        body = resp.content
-        truncated = False
-        if len(body) > self.cfg.max_asset_bytes:
-            body = body[: self.cfg.max_asset_bytes]
-            truncated = True
-
-        if not allow_any_type and looks_binary(body):
-            return FetchResult(url, str(resp.url), resp.status_code, ctype, "", len(resp.content),
-                               truncated=truncated, error="binary")
-
-        charset = resp.encoding or "utf-8"
+        if not allow_any_type and looks_binary(resp.body):
+            return FetchResult(url, resp.final_url, resp.status, resp.content_type, "",
+                               resp.size, truncated=resp.truncated, error="binary")
         try:
-            text = body.decode(charset, errors="replace")
+            text = resp.body.decode(resp.encoding, errors="replace")
         except (LookupError, UnicodeDecodeError):
-            text = body.decode("utf-8", errors="replace")
-        self.bytes_fetched += len(body)
+            text = resp.body.decode("utf-8", errors="replace")
+        self.bytes_fetched += len(resp.body)
         return FetchResult(
             url=url,
-            final_url=str(resp.url),
-            status=resp.status_code,
-            content_type=ctype,
+            final_url=resp.final_url,
+            status=resp.status,
+            content_type=resp.content_type,
             text=text,
-            size=len(resp.content),
-            truncated=truncated,
+            size=resp.size,
+            truncated=resp.truncated,
         )
+
+    async def _request(self, url: str) -> _RawBody:
+        """流式读取响应。
+
+        `max_asset_bytes` 为 0 时整份读完(不截断); 设了上限就读到上限为止再断开,
+        不去把几十兆先拉下来再扔掉。
+        """
+        limit = max(0, int(self.cfg.max_asset_bytes or 0))
+        async with self._client.stream("GET", url) as resp:
+            encoding = resp.encoding or "utf-8"
+            ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in resp.aiter_bytes():
+                chunks.append(chunk)
+                size += len(chunk)
+                if limit and size >= limit:
+                    break
+            body = chunks[0] if len(chunks) == 1 else b"".join(chunks)
+            truncated = bool(limit) and len(body) > limit
+            if truncated:
+                body = body[:limit]
+            declared = resp.headers.get("content-length", "")
+            # 截断时用 Content-Length 报真实大小, 免得界面上把"截到 5MB"当成文件就这么大
+            real_size = int(declared) if (truncated and declared.isdigit()) else max(size, len(body))
+            return _RawBody(resp.status_code, str(resp.url), encoding, ctype,
+                            body, real_size, truncated)

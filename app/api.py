@@ -1262,6 +1262,8 @@ def get_settings() -> dict[str, Any]:
         },
         "discovery": db.get_setting("discovery") or {},
         "analyzer_specs": analyzer_specs(),
+        # 前端"外部分析器"卡片要按这份配置渲染开关与上限, 之前漏了这个键, 卡片只能显示默认值
+        "analyzers": db.get_setting("analyzers") or {},
         "target_scanners": target_scanner_specs(),
         "target_scanner_config": (db.get_setting("analyzers") or {}).get("target_scanners") or {},
         "rules_revision": rules_revision(),

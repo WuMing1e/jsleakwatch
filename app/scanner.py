@@ -671,7 +671,7 @@ async def _external_analyzer_phase(
     for name, _ in analyzers:
         entry = (config.get("cli_analyzers") or {}).get(name) or {}
         summary[name] = {"assets": 0, "hits": 0, "new": 0, "merged": 0,
-                         "max_bytes": int(entry.get("max_bytes") or 2_000_000), "errors": []}
+                         "max_bytes": max(0, int(entry.get("max_bytes") or 0)), "errors": []}
 
     with tempfile.TemporaryDirectory(prefix="jslw-analyzers-") as tmp:
         for index, (url, text) in enumerate(pool):
@@ -680,7 +680,7 @@ async def _external_analyzer_phase(
                 if info["assets"] >= int((config.get("cli_analyzers") or {}).get(name, {})
                                          .get("max_assets") or 80):
                     continue
-                if len(text.encode("utf-8", "ignore")) > info["max_bytes"]:
+                if info["max_bytes"] and len(text.encode("utf-8", "ignore")) > info["max_bytes"]:
                     continue
                 path = Path(tmp) / f"{index}-{abs(hash(url)) % 10**8}.txt"
                 if not path.exists():

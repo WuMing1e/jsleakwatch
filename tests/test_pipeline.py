@@ -234,40 +234,61 @@ def test_headless_render_finds_runtime_only_addresses(prepared) -> None:
 
 # ------------------------------------------------------------ 抓取重试
 
-class _FakeResponse:
-    status_code = 200
-    headers = {"content-type": "application/javascript"}
-    content = b"var a = 1;"
-    encoding = "utf-8"
+class _FakeStreamResponse:
+    """够用的流式响应替身: 只实现 Fetcher._request 用到的几个属性。"""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, body: bytes, declared: int | None = None) -> None:
+        self.status_code = 200
         self.url = url
+        self.encoding = "utf-8"
+        self.body = body
+        self.headers = {"content-type": "application/javascript"}
+        if declared is not None:
+            self.headers["content-length"] = str(declared)
+
+    async def aiter_bytes(self):
+        step = 256 * 1024                      # 分块给, 贴近真实流式读取
+        for i in range(0, len(self.body), step):
+            yield self.body[i:i + step]
 
 
-class _FlakyClient:
+class _FakeClient:
     """前 N 次抛异常, 之后返回响应: 用来验证"抖动→重试→成功"这条路。"""
 
-    def __init__(self, failures: int, exc: Exception) -> None:
+    def __init__(self, failures: int = 0, exc: Exception | None = None,
+                 body: bytes = b"var a = 1;", declared: int | None = None) -> None:
         self.failures = failures
         self.exc = exc
+        self.body = body
+        self.declared = declared
         self.calls = 0
 
-    async def get(self, url: str):
+    def stream(self, method: str, url: str):
         self.calls += 1
-        if self.calls <= self.failures:
-            raise self.exc
-        return _FakeResponse(url)
+        fail = self.exc is not None and self.calls <= self.failures
+        exc = self.exc
+        resp = _FakeStreamResponse(url, self.body, self.declared)
+
+        class _Ctx:
+            async def __aenter__(inner):
+                if fail:
+                    raise exc
+                return resp
+
+            async def __aexit__(inner, *args):
+                return False
+
+        return _Ctx()
 
 
-def _fetch_with(client, retries: int):
+def _fetch_with(client, retries: int = 1, max_asset_bytes: int = 0):
     import asyncio
-
-    import httpx
 
     from app.config import ScanConfig
     from app.fetcher import Fetcher
 
-    fetcher = Fetcher(ScanConfig(max_retries=retries, per_host_delay_ms=0))
+    fetcher = Fetcher(ScanConfig(max_retries=retries, per_host_delay_ms=0,
+                                 max_asset_bytes=max_asset_bytes))
     fetcher._client = client
     return asyncio.run(fetcher.get("http://example.test/a.js")), fetcher
 
@@ -276,7 +297,7 @@ def test_transient_connect_timeout_is_retried_once() -> None:
     """一次连接超时不该让站点变成"部分成功": 重试一次应当拿到内容。"""
     import httpx
 
-    result, fetcher = _fetch_with(_FlakyClient(1, httpx.ConnectTimeout("连接超时")), retries=1)
+    result, fetcher = _fetch_with(_FakeClient(1, httpx.ConnectTimeout("连接超时")), retries=1)
     assert result.ok and result.text == "var a = 1;"
     assert fetcher.requests_made == 1
 
@@ -285,7 +306,7 @@ def test_read_timeout_is_not_retried() -> None:
     """站点自己响应慢就别重试了, 否则整轮扫描更久。"""
     import httpx
 
-    client = _FlakyClient(99, httpx.ReadTimeout("响应超时"))
+    client = _FakeClient(99, httpx.ReadTimeout("响应超时"))
     result, _ = _fetch_with(client, retries=1)
     assert not result.ok and result.error.startswith("ReadTimeout")
     assert client.calls == 1
@@ -294,7 +315,7 @@ def test_read_timeout_is_not_retried() -> None:
 def test_retry_gives_up_and_reports_last_error() -> None:
     import httpx
 
-    client = _FlakyClient(99, httpx.ConnectTimeout("连接超时"))
+    client = _FakeClient(99, httpx.ConnectTimeout("连接超时"))
     result, _ = _fetch_with(client, retries=1)
     assert not result.ok and result.error.startswith("ConnectTimeout")
     assert client.calls == 2, "重试一次即放弃"
@@ -303,7 +324,36 @@ def test_retry_gives_up_and_reports_last_error() -> None:
 def test_retries_can_be_turned_off() -> None:
     import httpx
 
-    client = _FlakyClient(99, httpx.ConnectTimeout("连接超时"))
+    client = _FakeClient(99, httpx.ConnectTimeout("连接超时"))
     result, _ = _fetch_with(client, retries=0)
     assert not result.ok
     assert client.calls == 1
+
+
+# ------------------------------------------------------------ 单资产大小上限
+
+def test_asset_larger_than_limit_is_truncated_when_limit_set() -> None:
+    body = b"x" * (3 * 1024 * 1024)
+    result, _ = _fetch_with(_FakeClient(body=body, declared=len(body)), max_asset_bytes=1_000_000)
+    assert result.truncated and len(result.text) == 1_000_000
+    assert result.size == len(body), "截断时也要报文件真实大小"
+
+
+def test_zero_limit_means_no_truncation() -> None:
+    """解除大小限制后, 整份文件都要下载并交给检测, 不能再截断。"""
+    body = b"var secret = 'x';\n" * 200_000          # 约 3.8 MB
+    result, fetcher = _fetch_with(_FakeClient(body=body, declared=len(body)), max_asset_bytes=0)
+    assert not result.truncated
+    assert len(result.text) == len(body), "0 = 不限, 不应截断"
+    assert fetcher.bytes_fetched == len(body)
+
+
+def test_detector_scans_whole_text_when_unlimited() -> None:
+    """检测引擎也不该自己再截一刀: 藏在文件尾部(10MB 之后)的密钥也要被抓到。"""
+    from app.rules import Detector
+
+    padding = "var a = 1;\n" * 900_000               # 约 9 MB 噪声
+    tail = 'const aws = "AKIA3XQ7ZP2LMN4KQ7DA";'
+    findings = Detector().scan_text(padding + tail, target_id=0, asset_url="http://x/big.js")
+    # 命中值默认只存掩码, 所以按规则 ID 断言
+    assert any(f.rule_id == "aws-access-key-id" for f in findings), "文件尾部的命中不应被截掉"

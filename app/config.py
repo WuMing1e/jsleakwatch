@@ -39,7 +39,7 @@ class ScanConfig:
     max_concurrency: int = 6           # 全局并发请求数
     per_host_delay_ms: int = 350       # 同一站点请求间隔, 做基本的礼貌限速
     max_assets_per_scan: int = 400    # 单次扫描最多抓取的 JS 资产数
-    max_asset_bytes: int = 5_000_000  # 单个资产大小上限
+    max_asset_bytes: int = 0           # 单个资产字节上限, 0 = 不限制(整份下载并扫描)
     max_depth: int = 2                 # HTML 页面递归深度
     follow_sourcemaps: bool = True     # 抓取 .map 并扫描 sourcesContent
     allow_cross_origin_js: bool = False

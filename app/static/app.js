@@ -101,6 +101,12 @@ function fmtTime(iso) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/* 字节数转成 MB 显示; 0 原样返回, 因为它表示"不限制"而不是"0 MB" */
+function bytesToMb(bytes) {
+  const n = Number(bytes || 0);
+  return n ? Math.round((n / 1024 / 1024) * 100) / 100 : 0;
+}
+
 function fromNow(iso) {
   if (!iso) return '—';
   const t = new Date(iso).getTime();
@@ -1744,13 +1750,19 @@ async function renderSettings() {
             <label class="field">全局并发请求数<input type="number" id="s-conc" min="1" max="32" value="${esc(scan.max_concurrency)}"></label>
             <label class="field">单站请求间隔 (毫秒)<input type="number" id="s-delay" min="0" max="5000" value="${esc(scan.per_host_delay_ms)}"></label>
           </div>
-          <div class="form-row-4">
+          <div class="form-row-3">
             <label class="field">请求超时 (秒)<input type="number" id="s-timeout" min="3" max="120" value="${esc(scan.timeout_seconds)}"></label>
             <label class="field">失败重试次数<input type="number" id="s-retries" min="0" max="3" value="${esc(scan.max_retries ?? 1)}"></label>
+            <label class="field">单资产大小上限 (MB)<input type="number" id="s-maxbytes" min="0" step="0.5" value="${esc(bytesToMb(scan.max_asset_bytes))}"></label>
+          </div>
+          <div class="form-row">
             <label class="field">单站资产上限<input type="number" id="s-maxassets" min="1" max="5000" value="${esc(scan.max_assets_per_scan)}"></label>
             <label class="field">页面递归深度<input type="number" id="s-depth" min="0" max="4" value="${esc(scan.max_depth)}"></label>
           </div>
-          <div class="field-hint">重试只作用于「连接没建立起来」和「连接被中途掐断」，站点自己响应慢不重试。</div>
+          <div class="field-hint">
+            重试只作用于「连接没建立起来」和「连接被中途掐断」，站点自己响应慢不重试。
+            单资产大小上限填 <span class="mono">0</span> 表示不限制，整份文件都会下载并扫描。
+          </div>
           <label class="field">User-Agent<input type="text" id="s-ua" value="${esc(scan.user_agent)}"></label>
           <label class="field">代理地址 (可选)<input type="text" id="s-proxy" placeholder="http://127.0.0.1:8080" value="${esc(scan.proxy || '')}"></label>
           <div class="form-row">
@@ -2035,6 +2047,9 @@ async function renderSettings() {
         <label class="field" style="width:110px">资产上限
           <input type="number" data-analyzer-max="${esc(name)}" min="1" max="2000" value="${esc(conf.max_assets || 80)}">
         </label>
+        <label class="field" style="width:120px">大小上限 (MB)
+          <input type="number" data-analyzer-bytes="${esc(name)}" min="0" step="0.5" value="${esc(bytesToMb(conf.max_bytes))}">
+        </label>
       </div>`;
     }).join('');
 
@@ -2121,6 +2136,7 @@ async function saveScanSettings() {
       per_host_delay_ms: Number($('#s-delay').value),
       timeout_seconds: Number($('#s-timeout').value),
       max_retries: Number($('#s-retries').value || 0),
+      max_asset_bytes: Math.round(Number($('#s-maxbytes').value || 0) * 1024 * 1024),
       max_assets_per_scan: Number($('#s-maxassets').value),
       max_depth: Number($('#s-depth').value),
       user_agent: $('#s-ua').value,
@@ -2255,6 +2271,10 @@ async function saveAnalyzerSettings() {
   $$('[data-analyzer-max]').forEach((input) => {
     const name = input.dataset.analyzerMax;
     cli[name] = { ...(cli[name] || {}), max_assets: Number(input.value || 80) };
+  });
+  $$('[data-analyzer-bytes]').forEach((input) => {
+    const name = input.dataset.analyzerBytes;
+    cli[name] = { ...(cli[name] || {}), max_bytes: Math.round(Number(input.value || 0) * 1024 * 1024) };
   });
   try {
     await api('/api/settings', { method: 'PUT', body: JSON.stringify({

@@ -340,6 +340,29 @@ def test_settings_roundtrip(client) -> None:
     assert before["server"]["version"]
 
 
+def test_settings_exposes_analyzer_config_and_size_limits(client) -> None:
+    """外部分析器卡片要按真实配置渲染; 单资产大小上限默认不限(0)。"""
+    body = client.get("/api/settings").json()
+    assert "analyzers" in body, "设置页要能拿到并联配置, 否则卡片只能显示默认值"
+    assert isinstance(body["analyzers"], dict)
+    assert body["scan"]["max_asset_bytes"] == 0, "默认不限制单资产大小"
+
+    # 上限可以设回去, 且能原样读回
+    res = client.put("/api/settings", json={"scan": {"max_asset_bytes": 8_388_608}})
+    assert res.json()["scan"]["max_asset_bytes"] == 8_388_608
+    client.put("/api/settings", json={"scan": {"max_asset_bytes": 0}})
+
+
+def test_analyzer_size_limit_roundtrip(client) -> None:
+    res = client.put("/api/settings", json={
+        "analyzers": {"run_in_scan": True,
+                      "cli_analyzers": {"stub": {"enabled": True, "max_bytes": 0}}},
+    })
+    assert res.status_code == 200
+    conf = res.json()["analyzers"]["cli_analyzers"]["stub"]
+    assert conf["max_bytes"] == 0
+
+
 def test_findings_filters_and_export(client) -> None:
     res = client.get("/api/findings", params={"status": "new,open", "severity": "critical,high", "limit": 10})
     assert res.status_code == 200

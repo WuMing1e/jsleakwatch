@@ -108,7 +108,8 @@ def main() -> int:
     maps = [a for a in assets if a["kind"] == "map"]
     pages = [a for a in assets if a["kind"] in ("html", "inline")]
     cfg = scan_config_from_settings()
-    truncated = [a for a in assets if a["size"] and a["size"] >= cfg.max_asset_bytes]
+    limit = cfg.max_asset_bytes or 0
+    truncated = [a for a in assets if limit and a["size"] and a["size"] >= limit]
 
     scan = db.query_one(
         "SELECT * FROM scans WHERE target_id=? ORDER BY id DESC LIMIT 1", (args.target_id,))
@@ -119,8 +120,9 @@ def main() -> int:
     print("## 1. 采集")
     print(f"- 资产合计 {len(assets)} 个: 脚本 {len(js)} · 映射 {len(maps)} · 页面/内联 {len(pages)}")
     total_bytes = sum(a['size'] or 0 for a in assets)
-    print(f"- 内容体积 {total_bytes/1024/1024:.2f} MB"
-          f"（单资产上限 {cfg.max_asset_bytes/1024/1024:.0f} MB，超限会被截断: {len(truncated)} 个）")
+    cap = (f"单资产上限 {limit/1024/1024:.0f} MB，超限会被截断: {len(truncated)} 个"
+           if limit else "单资产大小不限")
+    print(f"- 内容体积 {total_bytes/1024/1024:.2f} MB（{cap}）")
     if scan:
         attempted = (scan["assets_fetched"] or 0) + (scan["assets_failed"] or 0)
         rate = (scan["assets_fetched"] or 0) / attempted * 100 if attempted else 0
