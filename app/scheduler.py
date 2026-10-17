@@ -199,7 +199,10 @@ class Scheduler:
             if pending:
                 try:
                     from .scanner import triage_pending
-                    await triage_pending(pending)
+                    from .ai import ai_config
+                    # 补判上限跟着单轮复核上限走: 否则单轮 60 条、补判只给 50 条,
+                    # 剩下 10 条还是会带着"未复核"去推送
+                    await triage_pending(pending, cap=max(1, int(ai_config().max_calls_per_scan)))
                 except Exception as exc:  # noqa: BLE001 - 补判失败不影响告警
                     db.log_event(f"推送前补复核异常: {type(exc).__name__}: {exc}"[:200],
                                  kind="ai", level="warn", target_id=int(target["id"]))
@@ -207,10 +210,12 @@ class Scheduler:
             if summary.get("sent"):
                 skipped = summary.get("skipped_fake") or 0
                 quiet = (summary.get("skipped_public") or 0) + (summary.get("skipped_gated") or 0)
+                waiting = summary.get("skipped_unreviewed") or 0
                 db.log_event(
                     f"已推送 {summary['sent']} 条告警到飞书"
                     + (f", 跳过 {skipped} 条 AI 判定为误报" if skipped else "")
-                    + (f", 跳过 {quiet} 条公开密钥/高误报来源" if quiet else ""),
+                    + (f", 跳过 {quiet} 条公开密钥/高误报来源" if quiet else "")
+                    + (f", {waiting} 条未复核暂缓" if waiting else ""),
                     kind="alert", target_id=int(target["id"]),
                 )
             elif summary.get("failed"):

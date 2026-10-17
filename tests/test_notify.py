@@ -240,6 +240,49 @@ def test_high_false_positive_source_is_not_pushed() -> None:
     assert db.query_one("SELECT notified_at FROM findings WHERE id=?", (confirmed,))["notified_at"]
 
 
+def test_unreviewed_findings_are_held_when_ai_is_available() -> None:
+    """AI 开着且还有预算时, 没结论的先压住不发 —— 别把判断工作推给人。"""
+    db.set_setting("ai", {"enabled": True, "api_key": "test-key", "max_calls_per_day": 1000})
+    try:
+        reviewed = add_finding(fingerprint="fp-real2", verdict="real", confidence=0.9)
+        pending = add_finding(fingerprint="fp-none2")
+        n = notify.FeishuNotifier(alert_cfg())
+
+        async def capture(card):
+            return True, "已发送"
+
+        n.send_card = capture  # type: ignore[assignment]
+        summary = run(n.notify_findings([_item(reviewed, "fp-real2"), _item(pending, "fp-none2")]))
+        assert summary["sent"] == 1
+        assert summary["skipped_unreviewed"] == 1
+        assert db.query_one("SELECT notified_at FROM findings WHERE id=?", (pending,))["notified_at"] is None
+        assert db.query_one("SELECT notified_at FROM findings WHERE id=?", (reviewed,))["notified_at"]
+    finally:
+        db.set_setting("ai", {})
+
+
+def test_all_unreviewed_still_push_when_ai_looks_broken() -> None:
+    """整批都没结论通常是 AI 接口挂了: 这时失败开放, 照发并记一笔, 不能让监控静默。"""
+    db.set_setting("ai", {"enabled": True, "api_key": "test-key", "max_calls_per_day": 1000})
+    try:
+        one = add_finding(fingerprint="fp-u1")
+        two = add_finding(fingerprint="fp-u2")
+        n = notify.FeishuNotifier(alert_cfg())
+
+        async def capture(card):
+            return True, "已发送"
+
+        n.send_card = capture  # type: ignore[assignment]
+        summary = run(n.notify_findings([_item(one, "fp-u1"), _item(two, "fp-u2")]))
+        assert summary["sent"] == 2 and summary["skipped_unreviewed"] == 0
+        msg = db.query_one(
+            "SELECT message FROM events WHERE kind='alert' AND level='warn' ORDER BY id DESC LIMIT 1"
+        )["message"]
+        assert "未经 AI 复核" in msg
+    finally:
+        db.set_setting("ai", {})
+
+
 def test_all_fake_round_is_logged_not_sent() -> None:
     fake = add_finding(fingerprint="fp-only-fake", verdict="fake", confidence=0.9)
     n = notify.FeishuNotifier(alert_cfg())

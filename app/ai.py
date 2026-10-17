@@ -90,7 +90,9 @@ class AIConfig:
     semantic_max_assets: int = 5
     semantic_max_chars: int = 12000
     send_raw: bool = False               # 复核时发送明文而非掩码
-    max_calls_per_scan: int = 20
+    # 单站单轮复核上限。默认给到 60: 一次扫描的新发现通常在这以内,
+    # 卡在 20~30 时超出的部分只能带着"未复核"进推送, 是飞书噪声的主要来源之一。
+    max_calls_per_scan: int = 60
     max_calls_per_day: int = 500
 
 

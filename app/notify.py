@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 
-from . import db, gating
+from . import ai, db, gating
 from .ai import VERDICT_LABEL
 from .config import SETTINGS, AlertConfig
 from .rules import SEVERITY_ORDER
@@ -339,6 +339,7 @@ class FeishuNotifier:
         verdicts = self._ai_verdicts(items)
         candidates: list[dict[str, Any]] = []
         skipped_fake = skipped_public = skipped_gated = 0
+        unreviewed = 0
         for item in items:
             enriched = dict(item)
             verdict, confidence = verdicts.get(str(item.get("fingerprint") or ""), ("", 0.0))
@@ -353,7 +354,26 @@ class FeishuNotifier:
             if gating.is_gated(str(item.get("rule_id") or "")) and verdict not in gating.PASS_VERDICTS:
                 skipped_gated += 1
                 continue
+            if not verdict:
+                unreviewed += 1
             candidates.append(enriched)
+
+        # 未复核的不推: 没结论就发出去等于把判断工作推给人。
+        # 但要留失败开放 —— AI 没开、预算用完、或者整批一条都没审出来(多半是接口挂了),
+        # 那就照发并记一笔, 不能让监控静默失效。
+        skipped_unreviewed = 0
+        if unreviewed:
+            cfg_ai = ai.ai_config()
+            ai_available = (cfg_ai.enabled and ai.budget_left(cfg_ai) > 0
+                            and unreviewed < len(items))
+            if ai_available:
+                candidates = [c for c in candidates if c.get("ai_verdict")]
+                skipped_unreviewed = unreviewed
+            else:
+                db.log_event(
+                    f"{unreviewed} 条发现未经 AI 复核, 为避免漏报照常推送(AI 未启用/预算耗尽/接口异常)",
+                    kind="alert", level="warn",
+                )
 
         threshold = SEVERITY_ORDER.get(cfg.min_severity, 0)
         picked = [i for i in candidates if SEVERITY_ORDER.get(i.get("severity", "info"), 0) >= threshold]
@@ -367,6 +387,8 @@ class FeishuNotifier:
                 bits.append(f"{skipped_public} 条公开密钥")
             if skipped_gated:
                 bits.append(f"{skipped_gated} 条来自高误报来源")
+            if skipped_unreviewed:
+                bits.append(f"{skipped_unreviewed} 条未复核(等下一轮)")
             if low:
                 bits.append(f"{low} 条低于「{label}」")
             db.log_event(
@@ -375,6 +397,7 @@ class FeishuNotifier:
             )
             return {"sent": 0, "skipped": len(items), "skipped_fake": skipped_fake,
                     "skipped_public": skipped_public, "skipped_gated": skipped_gated,
+                    "skipped_unreviewed": skipped_unreviewed,
                     "reason": "、".join(bits) or f"无 >= {cfg.min_severity} 的发现"}
 
         targets = {
@@ -419,6 +442,7 @@ class FeishuNotifier:
             "skipped_fake": skipped_fake,
             "skipped_public": skipped_public,
             "skipped_gated": skipped_gated,
+            "skipped_unreviewed": skipped_unreviewed,
             "errors": self.errors[-3:],
         }
 
