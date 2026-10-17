@@ -26,6 +26,7 @@ from .rules import (
     RULES,
     SEVERITY_ORDER,
     collapse_string_concat,
+    looks_like_base64_fragment,
     shannon_entropy,
 )
 from .verify import passive_verify
@@ -712,7 +713,7 @@ async def _external_analyzer_phase(
     summary: dict[str, Any] = {}
     for name, _ in analyzers:
         entry = (config.get("cli_analyzers") or {}).get(name) or {}
-        summary[name] = {"assets": 0, "hits": 0, "new": 0, "merged": 0,
+        summary[name] = {"assets": 0, "hits": 0, "new": 0, "merged": 0, "fragments": 0,
                          "max_bytes": max(0, int(entry.get("max_bytes") or 0)), "errors": []}
 
     with tempfile.TemporaryDirectory(prefix="jslw-analyzers-") as tmp:
@@ -735,6 +736,10 @@ async def _external_analyzer_phase(
                         info["errors"].append(error[:200])
                     continue
                 for hit in hits:
+                    # 夹在连续 Base64 中间的命中是切出来的碎片, 不是独立的值
+                    if looks_like_base64_fragment(text, getattr(hit, "raw", "")):
+                        info["fragments"] += 1
+                        continue
                     info["hits"] += 1
                     created, fingerprint, payload = _upsert_external_hit(
                         target_id, url, name, hit)
@@ -748,6 +753,7 @@ async def _external_analyzer_phase(
     result.analyzer_summary = summary
     parts = [
         f"{name} 资产 {info['assets']} 新增 {info['new']} 归属合并 {info['merged']}"
+        + (f" 跳过碎片 {info['fragments']}" if info.get("fragments") else "")
         for name, info in summary.items()
     ]
     if parts:
@@ -859,13 +865,18 @@ async def _target_scanner_phase(
             summary[scanner.name] = {"hits": 0, "new": 0, "merged": 0, "runtime_ms": 0,
                                      "error": f"{type(exc).__name__}: {exc}"[:200], "note": ""}
             continue
-        info = {"hits": len(run.hits), "new": 0, "merged": 0,
+        info = {"hits": len(run.hits), "new": 0, "merged": 0, "fragments": 0,
                 "runtime_ms": run.runtime_ms, "error": run.error, "note": run.note}
         for hit in run.hits:
             asset_url = getattr(hit, "url", "") or target["base_url"]
             # 外部工具给的"上下文"未必在命中位置: JSHawk 给的是文件开头 200 字符,
             # 展示出来只会让人更糊涂。能从原文里定位就用真正的前后文替换。
-            _refine_hit_context(hit, (context_texts or {}).get(asset_url, ""))
+            text = (context_texts or {}).get(asset_url, "")
+            _refine_hit_context(hit, text)
+            # 命中值夹在连续 Base64 中间 -> 是切出来的碎片(实测一个随机串被当成 Okta token)
+            if looks_like_base64_fragment(text, getattr(hit, "raw", "")):
+                info["fragments"] += 1
+                continue
             created, fingerprint, payload = _upsert_external_hit(
                 target_id, asset_url, scanner.name, hit,
                 channel="scanner", found_by_label=scanner.name)
@@ -880,6 +891,7 @@ async def _target_scanner_phase(
     result.target_scanner_summary = summary
     parts = [
         f"{name} 命中 {info['hits']} 新增 {info['new']} 合并 {info['merged']}"
+        + (f" 跳过碎片 {info['fragments']}" if info.get("fragments") else "")
         for name, info in summary.items()
     ]
     errors = [f"{name}: {info['error']}" for name, info in summary.items() if info["error"]]

@@ -131,3 +131,28 @@ def test_masking_hides_middle() -> None:
 def test_entropy_helper() -> None:
     assert shannon_entropy("aaaaaaaa") < shannon_entropy("aB3kQ9mZ")
     assert looks_placeholder("null")
+
+
+def test_base64_fragment_detection() -> None:
+    """命中值夹在连续 Base64 中间 = 从密文里切出来的碎片, 不是独立的值。"""
+    from app.rules import looks_like_base64_fragment
+
+    raw = "00ivkbaFBztxUmeHZluXhgQ25PGNZwlzmrBryzsAfB"
+    assert looks_like_base64_fragment("xjqV7" + raw + "DhrNt1", raw)
+    assert not looks_like_base64_fragment(f'var okta="{raw}";', raw)
+    assert not looks_like_base64_fragment("TOKEN=" + raw, raw)
+    assert not looks_like_base64_fragment("x=" + raw + ";", raw)
+    assert not looks_like_base64_fragment(raw, raw), "整个文本就是命中值, 不该算碎片"
+
+
+def test_detector_skips_hits_inside_base64_blob() -> None:
+    from app.rules import Detector
+
+    detector = Detector()
+    key = "AKIA3XQ7ZP2LMN4KQ7DA"
+    embedded = "x" * 40 + key + "y" * 40
+    quoted = f'const aws = "{key}";'
+    assert not any(f.rule_id == "aws-access-key-id"
+                   for f in detector.scan_text(embedded, target_id=0)), "密文碎片不该报"
+    assert any(f.rule_id == "aws-access-key-id"
+               for f in detector.scan_text(quoted, target_id=0)), "正常写法要照报"

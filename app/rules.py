@@ -425,6 +425,30 @@ MAX_SCAN_BYTES = 0
 
 _NEWLINE_RE = re.compile("\n")
 
+_BASE64_CHAR = re.compile(r"[A-Za-z0-9+/=]")
+
+
+def looks_like_base64_fragment(text: str, raw: str, start: int | None = None) -> bool:
+    """命中值是不是从一段更长的 Base64 里"切"出来的碎片。
+
+    判据只有一条: 前后紧邻的字符也都是 Base64 字符 —— 说明它属于一个连续的字串,
+    而不是独立的值。真实的密钥不会写成这样:
+
+        ...C/xjqV7  00ivkbaFBztxUmeHZluXhgQ25PGNZwlzmrBryzsAfB  DhrNt1r3z...
+        （左边 7、右边 D 都是 base64 字符 → 碎片）
+
+    而正常写法两边是引号、等号、逗号、分号这类分隔符:
+
+        var okta="00iv..."    → 左边引号, 不算
+        AKIA...=token         → 右边不是 base64, 不算
+    """
+    if not text or not raw:
+        return False
+    index = text.find(raw) if start is None else start
+    if index <= 0 or index + len(raw) >= len(text):
+        return False
+    return bool(_BASE64_CHAR.match(text[index - 1]) and _BASE64_CHAR.match(text[index + len(raw)]))
+
 
 def explain_rule(rule: Rule, text: str, allowlist: Iterable[str] = (), limit: int = 20) -> dict:
     """给规则编辑器用: 跑一遍这条规则, 说明"匹配到几处、被哪些过滤器挡掉多少"。
@@ -595,6 +619,9 @@ class Detector:
                 if len(raw) > 400:
                     continue
                 if looks_placeholder(raw) or looks_like_code_path(raw):
+                    continue
+                # 夹在连续 Base64 中间的命中是"切"出来的碎片, 不是独立的值
+                if looks_like_base64_fragment(text, raw, start):
                     continue
                 if rule.keywords:
                     window_start = max(0, start - rule.window)

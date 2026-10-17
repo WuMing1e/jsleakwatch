@@ -431,6 +431,33 @@ def _new_target(db, base_url: str) -> dict:
     return {k: row[k] for k in row.keys()}
 
 
+def test_external_hit_inside_base64_is_not_imported(prepared) -> None:
+    """JSHawk 报的 Okta token 其实是 Base64 密文里切出来的一段 —— 这种不进发现列表。"""
+    import asyncio
+
+    from app.analyzers import RawHit
+    from app.scanner import ScanResult, _target_scanner_phase
+    from app.target_scanners import ScanRunResult
+
+    _target, db = prepared
+    target = _new_target(db, "http://frag.test/")
+    url = "http://frag.test/js/chunk.js"
+    secret = "00ivkbaFBztxUmeHZluXhgQ25PGNZwlzmrBryzsAfB"
+
+    class FakeScanner:
+        name = "faketool"
+
+        async def scan(self, _target):
+            return ScanRunResult(hits=[RawHit(rule_id="OKTA_TOKEN", severity="critical",
+                                              raw=secret, url=url)])
+
+    blob = "xjqV7" + secret + "DhrNt1r3zdooAjuQbSfCnE7sZ6Yt"
+    result = ScanResult(target["id"])
+    asyncio.run(_target_scanner_phase(target, [FakeScanner()], set(), result, {url: blob}))
+    assert db.query_one("SELECT id FROM findings WHERE target_id=?", (target["id"],)) is None
+    assert result.target_scanner_summary["faketool"]["fragments"] == 1
+
+
 def test_context_snippet_is_taken_around_the_match() -> None:
     from app.scanner import _context_around
 
