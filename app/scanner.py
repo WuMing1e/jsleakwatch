@@ -40,6 +40,7 @@ class ScanResult:
     assets_fetched: int = 0
     assets_new: int = 0
     assets_skipped: int = 0
+    assets_duplicate: int = 0
     assets_failed: int = 0
     assets_changed: int = 0
     bytes_fetched: int = 0
@@ -245,8 +246,11 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
             max_assets = int(target.get("max_assets") or cfg.max_assets_per_scan)
             max_depth = min(int(target.get("max_depth") or cfg.max_depth), 4)
             fetched = 0
+            entry_challenge = ""        # 入口就是人机校验页 -> 整站没得扫, 直接收工
+            seen_content: dict[str, str] = {}   # 内容哈希 -> 第一次见到它的地址
+            stop_scan = False
 
-            while frontier and fetched < max_assets:
+            while frontier and fetched < max_assets and not stop_scan:
                 # 同一批内也要去重: 外部采集器给出的地址可能与内置入口重叠
                 batch: list[Candidate] = []
                 batch_urls: set[str] = set()
@@ -269,12 +273,31 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                         if resp.error and resp.error != "binary" and len(errors) < 25:
                             errors.append(f"{cand.url}: {resp.error or f'HTTP {resp.status}'}")
                         continue
+                    # 人机校验页不是站点自己的内容: 存下来会变成一堆假资产,
+                    # 里面的 WAF 随机串还会被规则当成密钥(误报已经实际发生过)
+                    if resp.challenge:
+                        if cand.url == target["base_url"]:
+                            entry_challenge = resp.challenge
+                            stop_scan = True
+                        elif not entry_challenge and len(errors) < 25:
+                            errors.append(f"{cand.url}: {resp.challenge} 人机校验页")
+                        continue
                     if not resp.text:
                         continue
-                    fetched += 1
-                    result.assets_fetched += 1
 
                     sha = hashlib.sha256(resp.text.encode("utf-8", "ignore")).hexdigest()
+                    # 同一份内容只存一次、只扫一次。大量 SPA / 网关对任意路径都返回
+                    # 同一个页面, 不去重就会把一份内容存成几百个资产, 同一处命中报成几百条
+                    first_seen_url = seen_content.get(sha)
+                    if first_seen_url is not None and first_seen_url != cand.url:
+                        result.assets_duplicate += 1
+                        if result.assets_duplicate >= max_assets:
+                            stop_scan = True
+                        continue
+                    seen_content.setdefault(sha, cand.url)
+
+                    fetched += 1
+                    result.assets_fetched += 1
                     prev = stored_assets.get(cand.url)
                     # recheck: 发现被手动删除后, 资产要重新过一遍规则, 否则删掉的命中永远不会回来
                     unchanged = (bool(prev) and prev["sha256"] == sha
@@ -337,6 +360,18 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                 frontier = [c for url, c in next_batch.items() if url not in visited]
 
             result.bytes_fetched = fetcher.bytes_fetched
+
+        if entry_challenge:
+            # 明确说清"不是站点挂了, 是匿名请求被 WAF 挡在门外", 否则只会显示成一条无头无脑的超时
+            errors.insert(0, f"入口返回 {entry_challenge} 人机校验页, 匿名采集拿不到真实内容"
+                             f"(需要带 Cookie 采集, 或改用允许的来源 IP)")
+            # 整站都被挡在外面: 再跑 AI 复核、逐资产分析器、整站扫描器都是白烧时间
+            # (实测 JScanner2 会在这个校验页上耗到自己的 600 秒超时)
+            db.log_event(f"跳过外部分析: 入口是 {entry_challenge} 人机校验页, 没有可分析的内容",
+                         kind="scan", level="warn", target_id=target_id)
+            result.status = "failed"
+            result.error = "; ".join(errors[:5])
+            return result
 
         # ---- 落库比对
         for asset_url, kind, det in detections:

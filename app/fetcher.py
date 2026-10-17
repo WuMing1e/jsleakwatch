@@ -27,10 +27,34 @@ class FetchResult:
     size: int
     truncated: bool = False
     error: str = ""
+    challenge: str = ""        # 命中的是哪家 WAF 人机校验页, 空 = 正常内容
 
     @property
     def ok(self) -> bool:
         return self.status == 200 and not self.error
+
+
+# 人机校验页的强特征。这类页面是 200 + text/html, 但内容不是站点自己的:
+# 里面塞着 WAF 的随机令牌, 长度常和 API Key 撞上, 直接扫必然制造误报
+# (实测: 阿里云 WAF 的 <meta name="aliyun_waf_bb"> 被当成 AccessKey Secret 报了 critical)。
+CHALLENGE_MARKERS = (
+    ("aliyun_waf", ("aliyun_waf_aa", "aliyun_waf_bb")),
+    ("cloudflare", ("__cf_chl", "cf-chl", "just a moment...")),
+    ("tencent_waf", ("tencent_waf", "waf.tencent.com")),
+)
+
+
+def detect_challenge(text: str, content_type: str, headers: dict | None = None) -> str:
+    """认出 WAF 人机校验页。只认强特征, 宁可漏判也不误杀正常页面。"""
+    if headers and "challenge" in str(headers.get("cf-mitigated", "")).lower():
+        return "cloudflare"
+    if "html" not in (content_type or ""):
+        return ""
+    sample = text[:60000].lower()
+    for name, markers in CHALLENGE_MARKERS:
+        if any(marker in sample for marker in markers):
+            return name
+    return ""
 
 
 class _RawBody(NamedTuple):
@@ -43,6 +67,7 @@ class _RawBody(NamedTuple):
     body: bytes
     size: int          # 文件真实大小(能拿到 Content-Length 时用它, 否则是用实际收到的字节数)
     truncated: bool
+    cf_mitigated: str  # Cloudflare 挑战页会带 cf-mitigated: challenge
 
 
 def looks_binary(data: bytes) -> bool:
@@ -150,6 +175,9 @@ class Fetcher:
         except (LookupError, UnicodeDecodeError):
             text = resp.body.decode("utf-8", errors="replace")
         self.bytes_fetched += len(resp.body)
+
+        # 入口页拿到的是人机校验页时, 这轮其实什么都没看到, 交给上层决定要不要继续
+        challenge = detect_challenge(text, resp.content_type, {"cf-mitigated": resp.cf_mitigated})
         return FetchResult(
             url=url,
             final_url=resp.final_url,
@@ -158,6 +186,7 @@ class Fetcher:
             text=text,
             size=resp.size,
             truncated=resp.truncated,
+            challenge=challenge,
         )
 
     async def _request(self, url: str) -> _RawBody:
@@ -185,4 +214,5 @@ class Fetcher:
             # 截断时用 Content-Length 报真实大小, 免得界面上把"截到 5MB"当成文件就这么大
             real_size = int(declared) if (truncated and declared.isdigit()) else max(size, len(body))
             return _RawBody(resp.status_code, str(resp.url), encoding, ctype,
-                            body, real_size, truncated)
+                            body, real_size, truncated,
+                            resp.headers.get("cf-mitigated", ""))

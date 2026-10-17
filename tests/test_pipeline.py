@@ -357,3 +357,124 @@ def test_detector_scans_whole_text_when_unlimited() -> None:
     findings = Detector().scan_text(padding + tail, target_id=0, asset_url="http://x/big.js")
     # 命中值默认只存掩码, 所以按规则 ID 断言
     assert any(f.rule_id == "aws-access-key-id" for f in findings), "文件尾部的命中不应被截掉"
+
+
+def test_jshawk_scanner_runs_against_demo_site(demo_site) -> None:
+    """真调一次 JSHawk(本机留有工具副本时才跑), 验证"调起脚本 → 读报告"这条链路。"""
+    import asyncio
+
+    from app.target_scanners import JSHawkScanner
+
+    scanner = JSHawkScanner(module_dir=str(ROOT / "tools" / "external" / "JSHawk"),
+                            threads=4, timeout=120)
+    if not scanner.available():
+        pytest.skip("本机没有 JSHawk 副本(tools/external/JSHawk), 跳过")
+    run = asyncio.run(scanner.scan({"base_url": demo_site, "id": 0, "name": "Demo"}))
+    assert not run.error, run.error
+    # 样例站的 app.js 里埋了 Google/GitHub/Stripe/JWT/连接串等命中
+    assert len(run.hits) >= 4, run.note
+    kinds = {h.rule_id for h in run.hits}
+    assert any("GITHUB_TOKEN" in k for k in kinds), kinds
+    assert any(h.raw for h in run.hits), "命中值要带回明文给上层做掩码入库"
+
+
+# ------------------------------------------------------------ WAF 挑战页 / 重复内容
+
+WAF_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="aliyun_waf_aa" content="1adbee4a1f3c0d9e2b7a5c8d0e1f2a3b"></head>
+<body><textarea>c2VjcmV0bG9va2luZ2NpcGhlcnRleHQ=</textarea>
+<script>var arg1='5de24083e29177ff21e803d163d59e56776a29ea63730eb2fc';
+function getRenderData(){return document.getElementById("renderData").innerHTML}</script>
+<meta name="aliyun_waf_bb" content="f6d4a4f6661cb5f9eb7338a7c7ddd4c5"></body></html>"""
+
+PLAIN_PAGE = """<!doctype html><html><head><title>站点首页</title></head>
+<body><script src="/app.js"></script></body></html>"""
+
+
+def _serve(handler_cls) -> tuple:
+    """起一个临时站点, 返回 (server, base_url)。"""
+    try:
+        server = _Server(("127.0.0.1", 0), handler_cls)
+    except (PermissionError, OSError) as exc:
+        pytest.skip(f"无法监听本地端口: {exc}")
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{port}/"
+
+
+def _site_handler(page_body: str):
+    """所有路径都返回同一个页面 —— 典型的 SPA 回退 / WAF 拦截。"""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = page_body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    return Handler
+
+
+def _new_target(db, base_url: str) -> dict:
+    tid = db.execute(
+        "INSERT INTO targets(name, base_url, enabled, interval_minutes, scope, max_depth, "
+        "max_assets, include_sourcemaps, probe_common_config, created_at, next_scan_at) "
+        "VALUES(?,?,1,60,'same-origin',2,50,1,1,?,?)",
+        (base_url, base_url, db.utcnow(), db.utcnow()),
+    ).lastrowid
+    row = db.query_one("SELECT * FROM targets WHERE id=?", (tid,))
+    return {k: row[k] for k in row.keys()}
+
+
+def test_waf_challenge_page_is_skipped_entirely(prepared) -> None:
+    """入口就是人机校验页时: 不落资产、不扫内容, 并且把原因说清楚。
+
+    实测踩过: 阿里云 WAF 校验页里的 <meta name="aliyun_waf_bb"> 被当成
+    AccessKey Secret 报了 critical, 还推到了飞书。
+    """
+    _target, db = prepared
+    server, url = _serve(_site_handler(WAF_PAGE))
+    try:
+        target = _new_target(db, url)
+        result = _run(target)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.status == "failed"
+    assert "人机校验页" in result.error and "aliyun_waf" in result.error
+    assert result.assets_fetched == 0, "校验页不该被当成资产"
+    kept = db.query("SELECT url FROM assets WHERE target_id=?", (target["id"],))
+    assert kept == [], "整站都在校验页后面, 一个资产都不该存"
+    assert db.query("SELECT id FROM findings WHERE target_id=?", (target["id"],)) == []
+
+
+def test_identical_content_is_stored_only_once(prepared) -> None:
+    """SPA 对任意路径都返回同一个页面时, 只存一份, 别把它拆成几十个资产。"""
+    _target, db = prepared
+    server, url = _serve(_site_handler(PLAIN_PAGE))
+    try:
+        target = _new_target(db, url)
+        result = _run(target)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.status == "ok", result.error
+    assert result.assets_duplicate >= 1, "配置入口都返回首页, 应当被判定为重复内容"
+    urls = [row["url"] for row in db.query("SELECT url FROM assets WHERE target_id=?", (target["id"],))]
+    assert len(urls) == 1, f"只该留下入口页, 实际存了 {urls}"
+    assert urls[0] == url
+    """检测引擎也不该自己再截一刀: 藏在文件尾部(10MB 之后)的密钥也要被抓到。"""
+    from app.rules import Detector
+
+    padding = "var a = 1;\n" * 900_000               # 约 9 MB 噪声
+    tail = 'const aws = "AKIA3XQ7ZP2LMN4KQ7DA";'
+    findings = Detector().scan_text(padding + tail, target_id=0, asset_url="http://x/big.js")
+    # 命中值默认只存掩码, 所以按规则 ID 断言
+    assert any(f.rule_id == "aws-access-key-id" for f in findings), "文件尾部的命中不应被截掉"

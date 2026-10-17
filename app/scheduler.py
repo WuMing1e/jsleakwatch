@@ -185,6 +185,7 @@ class Scheduler:
             f"{name} 扫描完成: 资产 {result.assets_fetched} 个"
             f"(新增 {result.assets_new}, 复用 {result.assets_skipped}), "
             f"新发现 {len(result.new_findings)} 条, 失效 {result.resolved} 条"
+            + (f", 跳过重复内容 {result.assets_duplicate} 个" if result.assets_duplicate else "")
             + (f", 内容变更 {result.assets_changed} 个" if result.assets_changed else "")
             + (f", 无头渲染补 {result.runtime_seeds} 个地址" if result.runtime_seeds else "")
             + (f", {result.discovery_backend} 补充种子 {result.discovery_seeds} 个"
