@@ -25,6 +25,26 @@ from urllib.parse import urlparse
 
 CHROME_ENV = "JSLW_CHROME_PATH"
 
+# 同一时刻允许几个 Chrome 在跑。默认 1 —— 不是保守, 是实测结论:
+# 单跑一个 8 秒, 2 个并发要 25~35 秒, 4 个并发全部卡到超时(它们会互相拖死,
+# 不开 --virtual-time-budget 虽然不卡, 但拿到的 DOM 只有空壳 900 字节)。
+# 调度器本身是 8 个站点并行, 渲染这一步不串起来就必然大面积超时。
+_RENDER_LOCKS: dict[int, asyncio.Semaphore] = {}
+
+
+def _render_lock() -> asyncio.Semaphore:
+    """按事件循环取渲染闸门(测试里每次 asyncio.run 都是新循环)。"""
+    loop_id = id(asyncio.get_running_loop())
+    lock = _RENDER_LOCKS.get(loop_id)
+    if lock is None:
+        try:
+            limit = max(1, int(os.getenv("JSLW_RENDER_CONCURRENCY", "1")))
+        except ValueError:
+            limit = 1
+        lock = asyncio.Semaphore(limit)
+        _RENDER_LOCKS[loop_id] = lock
+    return lock
+
 _GLOBS = (
     "~/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-mac*/chrome-headless-shell",
     "~/Library/Caches/ms-playwright/chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",
@@ -113,6 +133,13 @@ async def render_page(url: str, timeout: float = 30.0, wait_ms: int = 4000,
     if not binary:
         result.error = "未找到 Chrome/Chromium, 可用 JSLW_CHROME_PATH 指定"
         return result
+    # 排队等闸门: 等待时间不计入渲染超时, 否则串行排队时后面的站点会"等超时"
+    async with _render_lock():
+        return await _render_once(url, timeout, wait_ms, binary)
+
+
+async def _render_once(url: str, timeout: float, wait_ms: int, binary: str) -> RenderResult:
+    result = RenderResult(url=url)
     profile = tempfile.mkdtemp(prefix="jslw-chrome-")
     netlog = Path(profile) / "netlog.json"
     started = time.monotonic()

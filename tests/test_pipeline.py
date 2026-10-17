@@ -431,6 +431,30 @@ def _new_target(db, base_url: str) -> dict:
     return {k: row[k] for k in row.keys()}
 
 
+def test_render_failure_is_a_warning_not_a_scan_failure(prepared, monkeypatch) -> None:
+    """无头渲染是"可选增强": 它失败不该把整站标成"部分成功"。"""
+    import asyncio
+
+    from app import scanner
+
+    target_row, db = prepared
+    target = _new_target(db, target_row["base_url"])
+    previous = db.get_setting("scan") or {}
+    db.set_setting("scan", {**previous, "headless_render": True})
+
+    async def fake_seeds(_target, _cfg, _extractor):
+        return [], ["无头渲染失败: 渲染超时 (30s)"]
+
+    monkeypatch.setattr(scanner, "collect_runtime_seeds", fake_seeds)
+    try:
+        result = asyncio.run(scanner.scan_target(target))
+    finally:
+        db.set_setting("scan", previous)
+
+    assert result.status == "ok", result.error
+    assert "渲染超时" in result.render_note
+
+
 def test_external_hit_inside_base64_is_not_imported(prepared) -> None:
     """JSHawk 报的 Okta token 其实是 Base64 密文里切出来的一段 —— 这种不进发现列表。"""
     import asyncio

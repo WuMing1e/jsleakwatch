@@ -188,6 +188,7 @@ class Scheduler:
             + (f", 跳过重复内容 {result.assets_duplicate} 个" if result.assets_duplicate else "")
             + (f", 内容变更 {result.assets_changed} 个" if result.assets_changed else "")
             + (f", 无头渲染补 {result.runtime_seeds} 个地址" if result.runtime_seeds else "")
+            + (f", 无头渲染未完成({result.render_note[:60]})" if result.render_note else "")
             + (f", {result.discovery_backend} 补充种子 {result.discovery_seeds} 个"
                if result.discovery_seeds else ""),
             kind="scan", level=level, target_id=int(target["id"]),

@@ -54,6 +54,7 @@ class ScanResult:
     discovery_backend: str = "builtin"
     discovery_seeds: int = 0
     runtime_seeds: int = 0
+    render_note: str = ""      # 无头渲染的失败原因; 只是可选增强没跑成, 不算扫描失败
     analyzer_summary: dict[str, Any] = field(default_factory=dict)
     target_scanner_summary: dict[str, Any] = field(default_factory=dict)
 
@@ -232,7 +233,12 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
         if cfg.headless_render:
             runtime_seeds, runtime_notes = await collect_runtime_seeds(target, cfg, extractor)
             result.runtime_seeds = len(runtime_seeds)
-            errors.extend(runtime_notes)
+            # 无头渲染只是"增强": 它失败说明没拿到运行时地址, 但静态采集该做的都做完了。
+            # 记成告警事件而不是扫描错误, 否则半个站点池都会显示成"部分成功"。
+            if runtime_notes:
+                result.render_note = "; ".join(runtime_notes)[:300]
+                db.log_event(f"无头渲染未完成: {result.render_note}",
+                             kind="runtime", level="warn", target_id=target_id)
 
         async with Fetcher(cfg) as fetcher:
             frontier: list[Candidate] = [
