@@ -249,6 +249,9 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
             entry_challenge = ""        # 入口就是人机校验页 -> 整站没得扫, 直接收工
             seen_content: dict[str, str] = {}   # 内容哈希 -> 第一次见到它的地址
             stop_scan = False
+            # 留一份有上限的原文, 只为了给外部工具的命中截取真实上下文
+            context_texts: dict[str, str] = {}
+            context_bytes = 0
 
             while frontier and fetched < max_assets and not stop_scan:
                 # 同一批内也要去重: 外部采集器给出的地址可能与内置入口重叠
@@ -298,6 +301,10 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
 
                     fetched += 1
                     result.assets_fetched += 1
+                    if (len(resp.text) <= CONTEXT_TEXT_MAX_FILE
+                            and context_bytes + len(resp.text) <= CONTEXT_TEXT_BUDGET):
+                        context_texts[cand.url] = resp.text
+                        context_bytes += len(resp.text)
                     prev = stored_assets.get(cand.url)
                     # recheck: 发现被手动删除后, 资产要重新过一遍规则, 否则删掉的命中永远不会回来
                     unchanged = (bool(prev) and prev["sha256"] == sha
@@ -395,7 +402,7 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
         # 整站型扫描器: 由本系统按站点调起, 结果并入同一套发现
         target_scanners = enabled_target_scanners()
         if target_scanners:
-            await _target_scanner_phase(target, target_scanners, seen_keys, result)
+            await _target_scanner_phase(target, target_scanners, seen_keys, result, context_texts)
 
         # AI 判定放在最后: 规则、逐资产分析器、整站扫描器的命中一起判, 口径统一
         semantic_ran = False
@@ -807,11 +814,40 @@ def _upsert_external_hit(
     }
 
 
+CONTEXT_WIDTH = 120
+CONTEXT_TEXT_BUDGET = 24 * 1024 * 1024      # 单站最多留多少原文用于截上下文
+CONTEXT_TEXT_MAX_FILE = 2 * 1024 * 1024     # 超过这个大小的文件不留(内存)
+
+
+def _context_around(text: str, raw: str, width: int = CONTEXT_WIDTH) -> str:
+    """截命中值前后各 width 个字符, 压缩空白(压缩代码里换行没意义)。"""
+    if not text or not raw:
+        return ""
+    index = text.find(raw)
+    if index < 0:
+        return ""
+    start = max(0, index - width)
+    end = min(len(text), index + len(raw) + width)
+    snippet = re.sub(r"\s+", " ", text[start:end]).strip()
+    return f"…{snippet}…" if start or end < len(text) else snippet
+
+
+def _refine_hit_context(hit: Any, text: str) -> None:
+    """把外部分析器给的上下文换成就地截取的那一段, 并丢掉完全对不上的片段。"""
+    snippet = _context_around(text, getattr(hit, "raw", ""))
+    if snippet:
+        hit.context = snippet
+    elif getattr(hit, "raw", "") and getattr(hit, "raw", "") not in (getattr(hit, "context", "") or ""):
+        # 工具给的片段里根本没有命中值, 留着等于误导
+        hit.context = ""
+
+
 async def _target_scanner_phase(
     target: dict[str, Any],
     scanners: list[Any],
     seen_keys: set[str],
     result: ScanResult,
+    context_texts: dict[str, str] | None = None,
 ) -> None:
     """调起整站型扫描器(JSHawk / JScanner2 等), 把结果并入发现体系。"""
     target_id = int(target["id"])
@@ -827,6 +863,9 @@ async def _target_scanner_phase(
                 "runtime_ms": run.runtime_ms, "error": run.error, "note": run.note}
         for hit in run.hits:
             asset_url = getattr(hit, "url", "") or target["base_url"]
+            # 外部工具给的"上下文"未必在命中位置: JSHawk 给的是文件开头 200 字符,
+            # 展示出来只会让人更糊涂。能从原文里定位就用真正的前后文替换。
+            _refine_hit_context(hit, (context_texts or {}).get(asset_url, ""))
             created, fingerprint, payload = _upsert_external_hit(
                 target_id, asset_url, scanner.name, hit,
                 channel="scanner", found_by_label=scanner.name)

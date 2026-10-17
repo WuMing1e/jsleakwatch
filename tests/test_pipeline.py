@@ -431,6 +431,50 @@ def _new_target(db, base_url: str) -> dict:
     return {k: row[k] for k in row.keys()}
 
 
+def test_context_snippet_is_taken_around_the_match() -> None:
+    from app.scanner import _context_around
+
+    text = "x" * 300 + 'var okta="abcdef123456";' + "y" * 300
+    snippet = _context_around(text, "abcdef123456", width=20)
+    assert 'okta="abcdef123456"' in snippet
+    assert snippet.startswith("…") and snippet.endswith("…")
+    assert _context_around(text, "NOT_THERE") == ""
+
+
+def test_external_hit_context_is_rebuilt_from_the_asset(prepared) -> None:
+    """外部工具给的"上下文"如果跟命中位置无关(实测 JSHawk 给的是文件开头), 要换成真实前后文。"""
+    import asyncio
+
+    from app.analyzers import RawHit
+    from app.scanner import ScanResult, _target_scanner_phase
+    from app.target_scanners import ScanRunResult
+
+    _target, db = prepared
+    target = _new_target(db, "http://ctx.test/")
+    url = "http://ctx.test/js/chunk.js"
+    secret = "00ivkbaFBztxUmeHZluXhgQ25PGNZwlzmrBryzsAfB"
+
+    class FakeScanner:
+        name = "faketool"
+
+        async def scan(self, _target):
+            return ScanRunResult(hits=[RawHit(
+                rule_id="OKTA_TOKEN", severity="critical", raw=secret,
+                context='(window["webpackJsonp"]=window["webpackJsonp"] []).push([...',
+                url=url,
+            )])
+
+    text = "x" * 500 + f'var okta="{secret}";' + "y" * 500
+    asyncio.run(_target_scanner_phase(target, [FakeScanner()], set(),
+                                      ScanResult(target["id"]),
+                                      {url: text}))
+    row = db.query_one("SELECT context FROM findings WHERE target_id=? AND rule_id=?",
+                       (target["id"], "faketool:OKTA_TOKEN"))
+    assert row is not None
+    assert "var okta=" in row["context"] and secret in row["context"]
+    assert "webpackJsonp" not in row["context"], "工具给的误导性片段不该留下"
+
+
 def test_waf_challenge_page_is_skipped_entirely(prepared) -> None:
     """入口就是人机校验页时: 不落资产、不扫内容, 并且把原因说清楚。
 
