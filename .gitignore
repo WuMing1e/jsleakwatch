@@ -29,5 +29,6 @@ outputs/assets/
 # 临时文件
 work/*.log
 work/dns-cache.json
+work/jshawk/
 *.log
 .DS_Store

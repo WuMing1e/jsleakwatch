@@ -17,6 +17,8 @@ JSHawk / JScanner2 / Katana 这类工具属于后者：输入是域名，自己�
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -198,8 +200,153 @@ class JScanner2Scanner:
 
 # ------------------------------------------------------------------ 注册与装配
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+# ------------------------------------------------------------------ JSHawk
+
+def read_jshawk_report(report: str | Path, host: str = "") -> list[RawHit]:
+    """读取 JSHawk 的 reports/jshawk.json。
+
+    报告结构: {"meta":…, "summary":…, "findings":[{type,secret,file,url,line,risk,entropy,context}]}
+    其中 secret 是明文 —— 它只在本系统的内存里过一道, 入库前照样按"默认只存掩码"处理。
+    """
+    path = Path(report)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    host = (host or "").lower()
+    hits: list[RawHit] = []
+    for item in (data.get("findings") or []):
+        if not isinstance(item, dict):
+            continue
+        secret = str(item.get("secret") or "").strip()
+        if not secret:
+            continue
+        url = str(item.get("url") or "").strip()
+        # 一轮只跑一个站点, 但结果里若出现别的域名就丢掉, 免得多站点数据混进同一个目标
+        netloc = urlparse(url).netloc.lower()
+        if host and netloc and netloc not in host and host not in netloc:
+            continue
+        line = str(item.get("line") or "").strip()
+        entropy = str(item.get("entropy") or "").strip()
+        hits.append(RawHit(
+            rule_id=f"jshawk:{(item.get('type') or 'unknown')}",
+            severity=normalize_severity(item.get("risk")),
+            raw=secret,
+            context=str(item.get("context") or "")[:1000],
+            line=int(line) if line.isdigit() else 0,
+            source=JSHawkScanner.name,
+            url=url,
+            note=f"熵 {entropy}" if entropy else "",
+        ))
+    return hits
+
+
+@dataclass
+class JSHawkScanner:
+    """JSHawk: JS 专项扫描器 (bash + curl, 自带抓取与深度爬链)。
+
+    module_dir : JSHawk.sh 所在目录
+    threads    : 它的并行线程数, 默认压到 8(它自己默认 15, 对被测站点太急)
+    deep_crawl : 是否让它继续追 JS 里的引用。默认关 —— 资产发现本系统自己会做,
+                 关掉能省一大截时间, 也避免两边重复抓同一批文件
+    timeout    : 单站最长等待
+
+    刻意不传的两个参数:
+      --validate      会拿命中的密钥去厂商 API 真实校验, 等于把凭据发给第三方;
+      --probe-endpoints / --probe-cookies  会主动请求接口, 属于额外流量。
+    两者都留给人工在需要时单独跑。
+    """
+
+    module_dir: str = ""
+    mode: str = "run"
+    threads: int = 8
+    timeout: int = 300
+    deep_crawl: bool = False
+    source_maps: bool = False
+    extra_args: list[str] = field(default_factory=list)
+    work_dir: str = "work/jshawk"
+    name = "jshawk"
+    label = "JSHawk (JS 专项: 正则 + 熵 + 上下文评分)"
+
+    def root(self) -> Path:
+        # 一定要绝对路径: 子进程的 cwd 会切到工具目录, 相对路径在那边就找不到了
+        return Path(self.module_dir).expanduser().resolve() if self.module_dir else Path()
+
+    def script(self) -> Path:
+        return self.root() / "JSHawk.sh"
+
+    def results_root(self) -> Path:
+        path = Path(self.work_dir)
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
+    def available(self) -> bool:
+        return bool(self.module_dir) and self.script().exists()
+
+    def build_command(self, target_url: str, outdir: Path) -> list[str]:
+        cmd = ["bash", str(self.script()), target_url,
+               "--format", "json", "--no-color", "--no-banner", "--silent",
+               "-o", str(outdir), "-t", str(max(1, self.threads))]
+        if not self.deep_crawl:
+            cmd.append("--no-deep-crawl")
+        if self.source_maps:
+            cmd.append("--source-maps")
+        cmd.extend(str(a) for a in self.extra_args)
+        return cmd
+
+    async def scan(self, target: dict[str, Any]) -> ScanRunResult:
+        if not self.available():
+            return ScanRunResult(error="未配置 module_dir 或 JSHawk.sh 不存在")
+        started = time.monotonic()
+        host = urlparse(target["base_url"]).netloc
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        # 每轮一个全新的输出目录: 天然做到"只导入本轮结果", 不用靠时间戳去猜
+        outdir = self.results_root() / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', host)}_{stamp}"
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        if self.mode == "run":
+            cmd = self.build_command(target["base_url"], outdir)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd, cwd=str(self.root()),
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return ScanRunResult(error=f"执行超时 (>{self.timeout}s)",
+                                     runtime_ms=int((time.monotonic() - started) * 1000))
+            except OSError as exc:
+                return ScanRunResult(error=f"无法执行: {exc}")
+            # 它的退出码: 0=没发现, 1=有发现, 2=出错。所以 1 是正常结果, 不是失败
+            if proc.returncode not in (0, 1):
+                tail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()
+                return ScanRunResult(
+                    error=f"退出码 {proc.returncode}: {tail[-1][:160] if tail else ''}",
+                    runtime_ms=int((time.monotonic() - started) * 1000))
+
+        reports = sorted(outdir.glob("*/reports/jshawk.json"), key=lambda p: p.stat().st_mtime)
+        if not reports and self.mode == "import":
+            reports = sorted(self.results_root().glob("*/reports/jshawk.json"),
+                             key=lambda p: p.stat().st_mtime)
+        if not reports:
+            return ScanRunResult(
+                runtime_ms=int((time.monotonic() - started) * 1000),
+                note="工具没有产出报告, 本轮按无命中处理")
+        hits = read_jshawk_report(reports[-1], host=host)
+        return ScanRunResult(
+            hits=hits, runtime_ms=int((time.monotonic() - started) * 1000),
+            note=f"{len(hits)} 条命中 (报告 {reports[-1].parent.parent.name})")
+
+
 BUILDERS = {
     "jscanner2": JScanner2Scanner,
+    "jshawk": JSHawkScanner,
 }
 
 

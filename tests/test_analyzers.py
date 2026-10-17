@@ -398,6 +398,93 @@ def test_enabled_target_scanners_respects_flag(tmp_path: Path) -> None:
     specs = target_scanners.target_scanner_specs()
     assert specs["jscanner2"]["available"] is True and specs["jscanner2"]["enabled"] is True
 
+
+def test_jshawk_can_be_enabled_alongside_jscanner2(tmp_path: Path) -> None:
+    """两个整站扫描器可以同时挂上: 各自的配置互不干扰。"""
+    from app import target_scanners
+
+    module = tmp_path / "JSHawk"
+    module.mkdir()
+    (module / "JSHawk.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+
+    db.set_setting("analyzers", {"target_scanners": {
+        "jshawk": {"enabled": True, "module_dir": str(module), "threads": 4}}})
+    names = [s.name for s in target_scanners.enabled_target_scanners()]
+    assert names == ["jshawk"]
+    specs = target_scanners.target_scanner_specs()
+    assert specs["jshawk"]["available"] is True
+    assert specs["jshawk"]["enabled"] is True
+
+
+# ------------------------------------------------------------ JSHawk
+
+def _jshawk_report(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "meta": {"tool": "JSHawk", "version": "3.1", "domain": "site.test"},
+        "summary": {"total": 3},
+        "findings": [
+            {"type": "GITHUB_TOKEN", "secret": "ghp_R2fXb9KqLm3Tn7Zv4Wd1As6Yc0Eu5Bh8Ij9P",
+             "file": "app.js", "url": "https://site.test/js/app.js", "line": "32",
+             "risk": "high", "entropy": "5.2", "context": "var t = \"ghp_...\""},
+            {"type": "DATABASE_URL", "secret": "redis://cache_admin:P8ssw0rd2024@10.12.4.7:6379/0",
+             "file": "app.js", "url": "https://site.test/js/app.js", "line": "18",
+             "risk": "medium", "entropy": "4.5", "context": "redis: \"...\""},
+            {"type": "OTHER_SITE", "secret": "AKIDz8krbsJ5yKBZQpn74WFkmLPx3gnPhESA",
+             "file": "x.js", "url": "https://other.test/js/x.js", "line": "1",
+             "risk": "high", "entropy": "5.0", "context": ""},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def test_jshawk_report_is_read_and_normalized(tmp_path: Path) -> None:
+    from app.target_scanners import read_jshawk_report
+
+    report = _jshawk_report(tmp_path / "run" / "site.test_1" / "reports" / "jshawk.json")
+    hits = read_jshawk_report(report, host="site.test")
+    assert len(hits) == 2, "别的域名那条要丢掉"
+    assert hits[0].rule_id == "jshawk:GITHUB_TOKEN"
+    assert hits[0].severity == "high"
+    assert hits[0].line == 32
+    assert hits[0].url.endswith("/js/app.js")
+    assert hits[0].source == "jshawk"
+    assert hits[1].rule_id == "jshawk:DATABASE_URL" and hits[1].severity == "medium"
+
+
+def test_jshawk_reader_is_safe_on_missing_or_broken_report(tmp_path: Path) -> None:
+    from app.target_scanners import read_jshawk_report
+
+    assert read_jshawk_report(tmp_path / "nope.json") == []
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    assert read_jshawk_report(broken) == []
+
+
+def test_jshawk_command_and_availability(tmp_path: Path) -> None:
+    from app.target_scanners import JSHawkScanner
+
+    assert JSHawkScanner().available() is False          # 未配置目录
+
+    module = tmp_path / "JSHawk"
+    module.mkdir()
+    (module / "JSHawk.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    scanner = JSHawkScanner(module_dir=str(module), threads=4, timeout=120)
+    assert scanner.available() is True
+    assert scanner.script().is_absolute(), "子进程会切 cwd, 脚本路径必须是绝对路径"
+
+    outdir = tmp_path / "out"
+    cmd = scanner.build_command("https://x.test/", outdir)
+    assert cmd[0] == "bash" and cmd[1].endswith("JSHawk.sh")
+    assert "--format" in cmd and "json" in cmd
+    assert "-o" in cmd and str(outdir) in cmd
+    assert cmd[cmd.index("-t") + 1] == "4"
+    assert "--no-deep-crawl" in cmd, "默认不追 JS 内的引用, 资产发现交给本系统"
+    # 这两件会外发流量/凭据, 默认绝不能带上
+    assert "--validate" not in cmd and "--probe-endpoints" not in cmd
+    assert str(scanner.results_root()).endswith("work/jshawk")
+
+
 MINI_HITS = [
     # 与内置引擎重叠 -> 应合并为同一条, 只追加来源
     {"rule": "aws-key", "severity": "critical", "secret": "AKIAJKQ7XH3MZ6BND4PA",
