@@ -206,9 +206,11 @@ class Scheduler:
             summary = await self.notifier.notify_findings(result.new_findings)
             if summary.get("sent"):
                 skipped = summary.get("skipped_fake") or 0
+                quiet = (summary.get("skipped_public") or 0) + (summary.get("skipped_gated") or 0)
                 db.log_event(
                     f"已推送 {summary['sent']} 条告警到飞书"
-                    + (f", 跳过 {skipped} 条 AI 判定为误报" if skipped else ""),
+                    + (f", 跳过 {skipped} 条 AI 判定为误报" if skipped else "")
+                    + (f", 跳过 {quiet} 条公开密钥/高误报来源" if quiet else ""),
                     kind="alert", target_id=int(target["id"]),
                 )
             elif summary.get("failed"):

@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 
-from . import db
+from . import db, gating
 from .ai import VERDICT_LABEL
 from .config import SETTINGS, AlertConfig
 from .rules import SEVERITY_ORDER
@@ -331,10 +331,14 @@ class FeishuNotifier:
             )
             return {"sent": 0, "skipped": len(items), "reason": "告警未启用"}
 
-        # AI 判定为误报的不推: 复核发生在推送之前, 结果直接决定这条要不要发出去
+        # 三道过滤, 和发现列表保持同一套口径:
+        #   1. AI 判为误报的不推;
+        #   2. AI 判为"公开密钥"的不推 —— 高德/百度地图 key、飞书 App ID 这类本来就要写在
+        #      前端, 推出去只会让人以为又出事了(实测这类占了飞书噪声的一大半);
+        #   3. 误报率超过门控阈值的来源不推, 除非 AI 明确判成真凭证。
         verdicts = self._ai_verdicts(items)
         candidates: list[dict[str, Any]] = []
-        skipped_fake = 0
+        skipped_fake = skipped_public = skipped_gated = 0
         for item in items:
             enriched = dict(item)
             verdict, confidence = verdicts.get(str(item.get("fingerprint") or ""), ("", 0.0))
@@ -342,6 +346,12 @@ class FeishuNotifier:
             enriched["ai_confidence"] = confidence
             if verdict == "fake":
                 skipped_fake += 1
+                continue
+            if verdict == "public":
+                skipped_public += 1
+                continue
+            if gating.is_gated(str(item.get("rule_id") or "")) and verdict not in gating.PASS_VERDICTS:
+                skipped_gated += 1
                 continue
             candidates.append(enriched)
 
@@ -353,6 +363,10 @@ class FeishuNotifier:
             bits = []
             if skipped_fake:
                 bits.append(f"{skipped_fake} 条 AI 判定为误报")
+            if skipped_public:
+                bits.append(f"{skipped_public} 条公开密钥")
+            if skipped_gated:
+                bits.append(f"{skipped_gated} 条来自高误报来源")
             if low:
                 bits.append(f"{low} 条低于「{label}」")
             db.log_event(
@@ -360,6 +374,7 @@ class FeishuNotifier:
                 kind="alert",
             )
             return {"sent": 0, "skipped": len(items), "skipped_fake": skipped_fake,
+                    "skipped_public": skipped_public, "skipped_gated": skipped_gated,
                     "reason": "、".join(bits) or f"无 >= {cfg.min_severity} 的发现"}
 
         targets = {
@@ -402,6 +417,8 @@ class FeishuNotifier:
             "total": len(capped),
             "failed": len(results) - ok,
             "skipped_fake": skipped_fake,
+            "skipped_public": skipped_public,
+            "skipped_gated": skipped_gated,
             "errors": self.errors[-3:],
         }
 
