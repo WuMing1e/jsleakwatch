@@ -133,6 +133,21 @@ def test_entropy_helper() -> None:
     assert looks_placeholder("null")
 
 
+def test_context_of_minified_code_keeps_the_match() -> None:
+    """压缩代码里没有空格: 以前"去掉开头残片"会把整段(连同命中值)砍掉。"""
+    from app.rules import Detector
+
+    prefix = 'e))(de||{}),Bn={VITE_APP_BASE_URL:"https://chat.seres.cn",'
+    hit = 'VITE_APP_LARK_APP_ID:"cli_a833f6416c9b900d",VITE_APP_APP_NAME:"小赛AI助手"}'
+    suffix = ';const Ve=Bn.VITE_APP_APP_NAME,gu="/",Ct="/auth",W=window.navigator.userAgent'
+    text = ("x" * 400) + prefix + hit + suffix
+    findings = Detector().scan_text(text, target_id=0, asset_url="http://x/a.js")
+    f = next((d for d in findings if d.rule_id == "feishu-app-id"), None)
+    assert f is not None
+    assert f.masked in f.context, f.context
+    assert "VITE_APP_LARK_APP_ID" in f.context, "字段名要能在上下文里看到"
+
+
 def test_base64_fragment_detection() -> None:
     """命中值夹在连续 Base64 中间 = 从密文里切出来的碎片, 不是独立的值。"""
     from app.rules import looks_like_base64_fragment

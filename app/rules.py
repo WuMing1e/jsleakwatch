@@ -710,14 +710,17 @@ class Detector:
         snippet = text[snippet_start: start + len(raw) + span]
         snippet = snippet.replace(raw, masked)
         snippet = re.sub(r"\s+", " ", snippet).strip()
-        # 前截断点落在词中间时丢掉这段残片, 避免出现 "cript>" 这类开头
+        # 前截断点落在词中间时丢掉这段残片, 避免出现 "cript>" 这类开头。
+        # 但压缩代码里几乎没有空格, split 出来的"第一个词"常常是整段 ——
+        # 直接砍会把命中值一起砍掉(实测 chat.seres.cn 的飞书 App ID 上下文里没有命中值)。
+        # 所以只在残片确实很短、且不含命中值时才丢。
         head = snippet.split(" ", 1)[0]
-        if (head and head != masked and len(snippet) > len(head) + 1 and snippet_start > 0
-                and text[snippet_start - 1] not in SEPARATORS):
+        if (snippet_start > 0 and text[snippet_start - 1] not in SEPARATORS
+                and head and head != masked and masked not in head and len(head) <= 40):
             snippet = snippet[len(head) + 1:]
         if len(snippet) > 360:
             idx = snippet.find(masked)
-            begin = max(0, idx - 160)
+            begin = max(0, idx - 160) if idx >= 0 else 0
             snippet = snippet[begin: begin + 360]
         return snippet
 

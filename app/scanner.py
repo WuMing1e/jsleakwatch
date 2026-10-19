@@ -548,9 +548,10 @@ def _upsert_finding(
         db.execute(
             "UPDATE findings SET last_seen_at=?, times_seen=times_seen+1, "
             "asset_id=COALESCE(?, asset_id), asset_url=?, status=?, "
-            "raw_value=COALESCE(raw_value, ?) WHERE id=?",
+            "raw_value=COALESCE(raw_value, ?), "
+            "context=CASE WHEN ?<>'' THEN ? ELSE context END WHERE id=?",
             (now, asset_id, asset_url, "new" if reopened else twin["status"],
-             det.raw or None, twin["id"]),
+             det.raw or None, det.context or "", det.context or "", twin["id"]),
         )
         return False, reopened, int(twin["id"])
 
@@ -560,10 +561,11 @@ def _upsert_finding(
         db.execute(
             "UPDATE findings SET last_seen_at=?, times_seen=times_seen+1, asset_id=COALESCE(?, asset_id), "
             "asset_url=?, status=?, verified=CASE WHEN ?<>'unverified' THEN ? ELSE verified END, "
-            "raw_value=COALESCE(raw_value, ?) "
+            "raw_value=COALESCE(raw_value, ?), "
+            "context=CASE WHEN ?<>'' THEN ? ELSE context END "
             "WHERE id=?",
             (now, asset_id, asset_url, "new" if reopened else existing["status"], verified, verified,
-             det.raw or None, existing["id"]),
+             det.raw or None, det.context or "", det.context or "", existing["id"]),
         )
         return False, reopened, int(existing["id"])
     new_id = int(db.execute(
@@ -812,9 +814,11 @@ def _upsert_external_hit(
             reopened = twin["status"] == "resolved"
             db.execute(
                 "UPDATE findings SET last_seen_at=?, times_seen=times_seen+1, status=?, "
-                "raw_value=COALESCE(raw_value, ?) WHERE id=?",
+                "raw_value=COALESCE(raw_value, ?), "
+                "context=CASE WHEN ?<>'' THEN ? ELSE context END WHERE id=?",
                 (now, "new" if reopened else twin["status"],
-                 (hit.raw or None) if store_raw else None, twin["id"]),
+                 (hit.raw or None) if store_raw else None,
+                 (hit.context or "")[:1200], (hit.context or "")[:1200], twin["id"]),
             )
             if reopened:
                 row = db.query_one("SELECT * FROM findings WHERE id=?", (twin["id"],))
