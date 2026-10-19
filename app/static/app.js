@@ -526,7 +526,7 @@ function externalToolsCard(info) {
 /* ------------------------------------------------------------------ 站点 */
 
 async function renderTargets() {
-  const page = state.targetsPage || 0;
+  let page = state.targetsPage || 0;
   const keyword = state.targetsQuery || '';
   const per = state.targetsPerPage || 25;
   const params = new URLSearchParams({ limit: String(per), offset: String(page * per) });
@@ -534,6 +534,13 @@ async function renderTargets() {
   const data = await api('/api/targets?' + params);
   const items = Array.isArray(data) ? data : (data.items || []);
   const total = data.total != null ? data.total : items.length;
+  // 删掉最后一页上的全部站点后, 当前页会越界: 不回到最后一页的话, 界面会显示
+  // "还没有监测站点", 让人以为整批都没了(实测踩过)
+  const lastPage = Math.max(0, Math.ceil(total / per) - 1);
+  if (page > lastPage) {
+    state.targetsPage = lastPage;
+    return renderTargets();
+  }
   state.cache.targets = items;      // 编辑按钮要按 id 回查, 之前只有发现页缓存过
   const view = $('#view');
   view.innerHTML = `
@@ -971,6 +978,12 @@ async function renderFindings() {
   state.cache.rules = rules.items;
 
   const f = state.filters;
+  // 删完最后一页的发现后同样会越界, 回退到最后一页
+  const lastPage = Math.max(0, Math.ceil((data.total || 0) / 50) - 1);
+  if (f.page > lastPage) {
+    f.page = lastPage;
+    return renderFindings();
+  }
   const statuses = [
     { key: 'new,open', label: '待处理' },
     { key: 'new', label: '待确认' },
@@ -1234,7 +1247,7 @@ function aiSection(f) {
 
 async function renderAssets() {
   const q = parseHash().query;
-  const page = state.assetsPage || 0;
+  let page = state.assetsPage || 0;
   const per = state.assetsPerPage || 25;
   const params = new URLSearchParams({ limit: String(per), offset: String(page * per) });
   if (q.target) params.set('target_id', q.target);
@@ -1247,6 +1260,11 @@ async function renderAssets() {
     apiList('/api/changes?' + changeParams),
   ]);
   const targets = targetData.items;
+  const lastPage = Math.max(0, Math.ceil((data.total || 0) / per) - 1);
+  if (page > lastPage) {
+    state.assetsPage = lastPage;
+    return renderAssets();
+  }
   const view = state.assetsView || 'list';
   $('#view').innerHTML = `
     <section class="card">
