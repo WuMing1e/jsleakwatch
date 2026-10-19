@@ -1975,7 +1975,11 @@ async function renderSettings() {
             <label class="switch"><input type="checkbox" id="ai-verify" ${ai.verify_new_findings ? 'checked' : ''}><span class="track"></span>扫描后自动复核新发现</label>
             <label class="switch"><input type="checkbox" id="ai-auto-fp" ${ai.auto_mark_false_positive ? 'checked' : ''}><span class="track"></span>高置信度误报自动标记为「误报」</label>
             <label class="switch"><input type="checkbox" id="ai-semantic" ${ai.semantic_scan ? 'checked' : ''}><span class="track"></span>开启语义补漏 (会把资产内容发给模型)</label>
-            <label class="switch"><input type="checkbox" id="ai-raw" ${ai.send_raw ? 'checked' : ''}><span class="track"></span>复核时发送明文命中值 (默认只发掩码)</label>
+            <label class="switch"><input type="checkbox" id="ai-raw" ${ai.send_raw ? 'checked' : ''}><span class="track"></span>复核时发送明文命中值（默认只发掩码）</label>
+          </div>
+          <div class="field-hint" id="ai-raw-hint" ${ai.send_raw ? '' : 'hidden'}>
+            明文会发给当前配置的模型端点（<span class="mono">${esc(ai.base_url || '')}</span>）。
+            接入公司内网算力后再开更稳妥。
           </div>
 
           <div class="form-row-3">
@@ -2829,6 +2833,11 @@ document.addEventListener('input', (event) => {
 });
 
 document.addEventListener('change', (event) => {
+  if (event.target.id === 'ai-raw') {
+    const hint = $('#ai-raw-hint');
+    if (hint) hint.hidden = !event.target.checked;
+    return;
+  }
   const el = event.target.closest('[data-act]');
   if (!el) return;
   const act = el.dataset.act;
