@@ -126,6 +126,27 @@ def test_status_transitions(prepared) -> None:
     assert resolved == 0, "命中的凭证重新出现时应从已失效恢复为待处理"
 
 
+def test_marked_false_positive_is_not_alerted_again(prepared) -> None:
+    """标成误报/忽略后, 后续扫到同一条不应再进告警队列。"""
+    import asyncio
+
+    from app.scanner import scan_target
+
+    target, db = prepared
+    asyncio.run(scan_target(target, full=True))     # 先用一轮扫描把样例站点的发现跑出来
+    row = db.query_one(
+        "SELECT id, fingerprint FROM findings WHERE rule_id='database-url' ORDER BY id LIMIT 1")
+    assert row is not None
+    db.execute("UPDATE findings SET status='false_positive' WHERE id=?", (row["id"],))
+
+    # 强制重扫: 走的是"资产内容未变也会重新检测"的路径, 最容易被误当成新发现
+    result = asyncio.run(scan_target(target, full=True))
+    after = db.query_one("SELECT status FROM findings WHERE id=?", (row["id"],))
+    assert after["status"] == "false_positive", "已标记的状态不该被重扫改回 new"
+    assert all(f.get("fingerprint") != row["fingerprint"] for f in result.new_findings), \
+        "标记过的命中不该再次进入推送队列"
+
+
 def test_deleted_finding_is_redetected_on_next_scan(prepared) -> None:
     """删掉的发现, 下一轮要能重新命中 —— 增量扫描默认跳过未变资产, 所以删除时必须重新武装。"""
     import asyncio
