@@ -77,13 +77,17 @@ sourcemap ─┘   (同域/深度/上限约束)     │ app/rules.py   │
 | --- | --- |
 | `app/rules.py` | 规则表、占位符/代码路径过滤、熵计算、重叠消歧、拼接还原 |
 | `app/fetcher.py` | httpx 异步流式抓取：全局并发闸门、同域礼貌限速、二进制识别、连接类失败重试、可选大小上限 |
+| `app/runtime.py` | 无头浏览器采集：`--dump-dom` 拿执行后的 DOM、netlog 拿运行时请求；渲染全局串行（多实例会互相拖死） |
 | `app/discover.py` | 从 HTML / JS 中提取脚本、chunk、sourcemap、站内页面 |
 | `app/scanner.py` | 单站点扫描编排、指纹比对、状态流转、增量跳过 |
+| `app/asset_history.py` | 资产内容版本：只存字符串签名（命中值掩码），算新增/消失的字符串 |
 | `app/scheduler.py` | 到期检测、并发工作协程、退避、扫描后触发告警 |
 | `app/notify.py` | 飞书卡片构造与发送（webhook / 应用两种模式） |
 | `app/verify.py` | 被动验证（JWT 解析、PEM 校验、URL 归属）+ 外部工具桥接 |
 | `app/ai.py` | AI 层：误报复核、语义补漏、规则生成；多后端客户端、预算与缓存、提示注入防护 |
+| `app/gating.py` | 误报门控：按来源统计历史误报率，超过阈值的先藏起来（AI 判成真凭证的照常显示） |
 | `app/analyzers.py` | 采集/分析后端的可插拔接口：内置实现 + Katana 适配器 + 通用 CLI 分析器适配器 |
+| `app/target_scanners.py` | 整站型扫描器适配层（输入站点 URL、工具自己抓取）：JSHawk / JScanner2 |
 | `app/benchmark.py` | 冻结语料、标注、多分析器打分（精确率/召回率/F1、独有命中、漏报清单） |
 | `app/importers/gitleaks.py` | gitleaks TOML 规则 → 内置规则转换 |
 | `app/api.py` | HTTP 接口与 SSE |
@@ -109,11 +113,13 @@ sourcemap ─┘   (同域/深度/上限约束)     │ app/rules.py   │
 3. 熵阈值——变量名像密钥但值是低随机度字符串时过滤；
 4. 重叠消歧——同一段文本被多条规则命中时按 (等级, 规则优先级) 只保留最有价值的一条，例如 `redis://user:pass@host` 只报「数据库连接串」而不重复报「URL 内嵌凭据」；
 5. 拼接还原——`"https://api.x/" + "?token=" + "..."` 这种规避写法会先把相邻字符串字面量拼起来再匹配；
-6. 跨轮去重——指纹不变则不重复告警。
+6. Base64 碎片过滤——命中值前后紧邻的字符也都是 Base64 字符时，说明它是从一段密文中间"切"出来的（实测一个随机串被 JSHawk 当成 Okta token 报了严重），直接丢弃；正常写法两边是引号/等号/分号，不受影响；
+7. 人机校验页识别——入口返回阿里云 / Cloudflare / 腾讯云 WAF 的挑战页时整轮收工，不落资产、不扫内容（这类页面里的随机令牌长度常与 API Key 撞上）；
+8. 跨轮去重——指纹不变则不重复告警。
 
 ## 5. 持续监测机制
 
-- 每 5 秒检查一次到期站点，按 `next_scan_at` 顺序入队，最多 3 个站点并行，手动触发与定时任务共用队列；
+- 每 5 秒检查一次到期站点，按 `next_scan_at` 顺序入队，默认 3 个站点并行（可在设置里调，本次实例配的是 8），手动触发与定时任务共用队列；
 - 单站内部：按资产指纹（SHA256）+ 规则版本号判断，**内容没变的资产直接跳过重复检测**，只刷新「最近出现」时间；
 - 状态流转：`待确认 → 已确认 / 误报 / 忽略`，内容消失自动转「已失效」，之后**重新出现会再次告警**（复现）；
 - 规则或白名单改动会自增 `rules_revision`，使存量资产在下一轮全量重扫，避免规则调整后结果不刷新;
@@ -149,11 +155,22 @@ sourcemap ─┘   (同域/深度/上限约束)     │ app/rules.py   │
 
 ### 什么时候会推 / 不会推
 
-只有**扫描跑完后新出现或复现**的发现才推送，具体规则：
+只有**扫描跑完后新出现或复现**的发现才推送，而且推送前会过四道过滤（和「泄露发现」列表同一套口径）：
 
-- **AI 判定为误报的不推**：AI 复核在推送之前跑完，判定 `fake` 的条目直接不发；判定为「真凭证 / 公开密钥 / 待人工确认」以及未复核的照常推送，卡片上会标注 AI 结论与置信度；
+| 过滤 | 处理 |
+| --- | --- |
+| AI 判定 `fake`（误报） | 不推 |
+| AI 判定 `public`（公开密钥，如高德/百度地图 key、飞书 App ID） | 不推 —— 这类值本来就要写在前端 |
+| 来源的历史误报率超过门控阈值（默认 60%） | 不推，除非 AI 明确判成「真凭证」 |
+| AI 还没出结论 | 暂缓，等下一轮复核后再发 |
+
+「暂缓」留了三个例外，避免监控静默失效：**AI 未启用**、**当日预算耗尽**、或**整批一条都没审出来**（多半是接口挂了）时，照常推送并在事件日志里写明「未经 AI 复核」。跳过多少条、为什么跳过，都会写进事件日志。
+
+其余规则：
+
 - 等级低于「最低推送等级」（默认中危）的不推；
 - 已经推送过的发现不会重复推（数据库里 `notified_at` 有值）；
+- **标记为「误报」或「忽略」的发现，后续扫到同一条不会再推**（状态原样保留）；手动删除的会重新命中并再次推送；命中消失后再次出现（复现）也会推；
 - 单轮超过汇总阈值合并成一张卡片，所以事件日志里的「已推送 1 条告警」指的是 1 张卡片，可能包含多条发现；
 - 扫描失败或本轮没有新发现的站点不发消息；暂停状态的站点不会被自动扫描，自然也不会有告警；
 - 推送失败**不会**被标记成已推送，也不会静默——事件日志与「系统设置 → 飞书告警」底部的「最近推送」都会写出结果与原因（等级不够、告警未启用、飞书返回的错误码等）。
@@ -446,6 +463,7 @@ JSLW_AI_BASE_URL=http://glm.corp.example.com/v1 JSLW_AI_MODEL=glm-5.2
 | `max_concurrency` | 6 | 全局并发请求数 |
 | `per_host_delay_ms` | 350 | 同域请求间隔，礼貌限速 |
 | `timeout_seconds` | 15 | 单请求超时 |
+| `max_retries` | 1 | 连接类失败（连接超时 / 被中途掐断）的重试次数，`0` = 不重试 |
 | `max_assets_per_scan` | 400 | 单站单轮资产上限 |
 | `max_asset_bytes` | 0（不限） | 单资产字节上限，`0` = 整份下载并扫描 |
 | `max_depth` | 2 | HTML 页面递归深度（≤4） |
@@ -456,7 +474,7 @@ JSLW_AI_BASE_URL=http://glm.corp.example.com/v1 JSLW_AI_MODEL=glm-5.2
 | `store_raw_secrets` | 关 | 是否落库明文（`JSLW_STORE_RAW=1` 亦可开启，风险自负） |
 | `scan_api_endpoints` | 关 | 是否顺带抓取同源 GET 接口响应一并扫描（额外请求，按需开启） |
 | `max_api_endpoints` | 20 | 单站单轮最多抓几个接口 |
-| `headless_render` | 关 | 是否用无头浏览器渲染页面（需本机 Chrome/Chromium，单站慢约 1~3 秒） |
+| `headless_render` | 关 | 是否用无头浏览器渲染页面（需本机 Chrome/Chromium）。渲染**全局串行**，单页约 6~10 秒；并发跑多个 headless 实例会互相拖死，所以并行扫多少站都只同时跑一个 Chrome（`JSLW_RENDER_CONCURRENCY` 可调）。渲染失败只记告警，不影响扫描结论 |
 | `max_render_pages` | 1 | 单站单轮最多渲染几个页面 |
 | `render_wait_ms` | 4000 | 渲染等待时间（Chrome 虚拟时间预算） |
 
@@ -471,7 +489,7 @@ AI 相关配置（「系统设置 → AI 复核」，也可用 `JSLW_AI_*` 环�
 | `semantic_scan` | 关 | 是否做语义补漏（会把资产内容发给模型） |
 | `semantic_max_assets` / `semantic_max_chars` | 5 / 12000 | 语义审计的资产数与单资产字符上限 |
 | `send_raw` | 关 | 复核时发送明文而非掩码 |
-| `max_calls_per_scan` / `max_calls_per_day` | 20 / 500 | 预算闸门 |
+| `max_calls_per_scan` / `max_calls_per_day` | 60 / 500 | 预算闸门；单轮上限同时决定"推送前补判"能覆盖多少条 |
 
 ## 12. 部署建议
 
@@ -609,17 +627,43 @@ python3.10 tools/rules_quality.py --corpus demo --labels work/labels.jsonl \
 控制台「检测规则」页另有一张规则质量卡，用**真实命中 + AI 复核结果**给出每条规则的误报率与建议。
 
 ```bash
-python3.10 -m pytest tests -q          # 108 个用例
+python3.10 -m pytest tests -q          # 194 个用例
 python3.10 work/check_frontend.py      # 前端 data-act 与后端路由一致性自检
 ```
 
 - `tests/test_rules.py`：规则命中/漏报、占位符与资源路径过滤、重叠消歧、拼接还原、指纹稳定性、白名单、PII 默认关闭
 - `tests/test_discover.py`：HTML/JS 引用提取、跨域与资源后缀过滤、webpack chunk 映射展开、sourcemap 跟随
 - `tests/test_api.py`：站点增删改查、规则导入、白名单、设置往返、发现筛选与 CSV 导出、静态资源
-- `tests/test_pipeline.py`：起本地样例站跑完整扫描——验证 chunk/sourcemap 采集、增量跳过、明文不入库、失效后复现
+- `tests/test_pipeline.py`：起本地样例站跑完整扫描——验证 chunk/sourcemap 采集、增量跳过、明文不入库、失效后复现、**标记误报后重扫不再入告警队列**、WAF 挑战页整站跳过、同内容资产去重、外部命中上下文按真实位置截取、Base64 碎片丢弃
+- `tests/test_notify.py`：飞书推送的过滤口径——误报/公开密钥/高误报来源不推、未复核暂缓、AI 不可用时失败开放、推送失败不标记已推送
 - `tests/test_ai.py`：用 httpx MockTransport 模拟 OpenAI 兼容端点——base_url 容错、`response_format`/`max_tokens` 回退、无鉴权模式、掩码不外发明文、缓存命中、预算封顶、语义补漏前的明文脱敏、规则生成校验（含掩码还原）、AI 阶段自动标记误报
 - `tests/test_analyzers.py`：用桩二进制验证 Katana JSONL 解析（去重/同源/方法过滤/二进制后缀过滤/失败降级）、CLI 分析器三种输出形态与字段映射、外部工具失败必须显式报错、评测打分（未标注不计入误报、独有命中归属、漏报清单、不可用分析器可见）
 
-## 14. 合规声明
+## 14. 运维工具
+
+| 工具 | 用途 |
+| --- | --- |
+| `tools/asset_recon.py` | **公网资产收集**：证书透明度日志（crt.sh）+ urlscan.io + hackertarget + rapiddns + 本系统已监测站点，再用「已知业务词 + 环境后缀」定向扩展，DNS 解析、逐个探活，导出 CSV / Markdown / 可导入清单。只做 DNS 与单次 GET，不做端口扫描 |
+| `tools/dedupe_assets.py` | **重复资产清理**：同一站点里内容完全相同的资产只留最早一条，发现能合并就合并。默认只预演，`--apply` 才写库（写前自动备份到 `data/backup/`） |
+| `tools/api_smoke.py` | **全接口冒烟**：把控制台所有接口跑一遍并断言返回结构，改完接口先跑它 |
+| `tools/coverage.py` | **覆盖率报告**：回答"某站点里 manifest 声明的 JS 是否都采到了"，并区分真缺口与多余候选 |
+| `tools/benchmark.py` / `tools/compare_scanners.py` | 冻结语料、人工标注、多分析器打分与横向对比 |
+
+```bash
+# 收集公网资产（先只走公开来源，确认范围后再开名称扩展）
+python3.10 tools/asset_recon.py --domain seres.cn --from-db
+python3.10 tools/asset_recon.py --domain seres.cn --from-db --no-brute
+
+# 导出的清单可以直接用控制台「批量新增」导入；也可以先看预演
+python3.10 tools/dedupe_assets.py            # 预演
+python3.10 tools/dedupe_assets.py --apply    # 执行（自动备份）
+
+# 改完接口跑一遍冒烟
+python3.10 tools/api_smoke.py --base http://127.0.0.1:8787
+```
+
+关于 DNS 的两个实测教训，写进工具里了：系统解析器遇到不存在的域名要等满 5 秒，上千个名字就是二十分钟，改用 dnspython 直查后降到一分钟内；并发别开太大，一次轰几千个查询会被内网 DNS 限流，表现成"全都解析不出来"。
+
+## 15. 合规声明
 
 本系统用于自身资产或已取得书面授权的资产安全巡检。请遵守《网络安全法》《数据安全法》《个人信息保护法》及目标站点所在司法辖区的法律；规则中的个人信息检测项（手机号、身份证号）默认关闭，启用前请确认有合法处理依据。因使用不当造成的后果由使用者承担。
