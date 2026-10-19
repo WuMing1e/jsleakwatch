@@ -1066,7 +1066,9 @@ async function renderFindings() {
               <td class="shrink"><input type="checkbox" class="check" data-act="select-one" data-id="${r.id}"${state.selected.has(r.id) ? ' checked' : ''}></td>
               <td class="shrink">${sevChip(r.severity)}</td>
               <td><div class="cell-clip w-md" title="${esc(r.rule_name)}">${esc(r.rule_name)}${sourceTag(r)}</div></td>
-              <td><span class="val-mask">${esc(r.match_masked)}</span></td>
+              <td>${r.raw_value
+                ? `<span class="val-plain mono" title="${esc(r.raw_value)}">${esc(r.raw_value)}</span>`
+                : `<span class="val-mask">${esc(r.match_masked)}</span>`}</td>
               <td class="muted">
                 <div class="cell-clip w-sm" title="${esc(r.target_name || '')}">${esc(r.target_name || '')}</div>
                 ${r.reuse_sites > 1 ? `<span class="tag tag-warn" title="同一命中值出现在 ${r.reuse_sites} 个站点">复用 ${r.reuse_sites} 站</span>` : ''}
@@ -1182,7 +1184,12 @@ async function openFinding(id) {
     </div>
     <div class="drawer-body">
       <dl class="kv">
-        <dt>命中值</dt><dd><span class="val-mask">${esc(f.match_masked)}</span> <span class="muted">(原文不入库，仅存掩码)</span></dd>
+        <dt>命中值</dt><dd>${f.raw_value
+          ? `<span class="val-plain mono">${esc(f.raw_value)}</span>
+             <button class="btn btn-icon btn-sm" title="复制命中值" data-act="copy" data-text="${esc(f.raw_value)}">${icon('copy', 13)}</button>
+             <span class="tag" style="margin-left:6px">明文</span>`
+          : `<span class="val-mask">${esc(f.match_masked)}</span>
+             <span class="muted">(该发现入库时未保存明文；重新扫描后会补齐)</span>`}</dd>
         <dt>所属站点</dt><dd>${esc(f.target_name || '')} <span class="muted mono" style="font-size:11.5px">${esc(f.target_url || '')}</span></dd>
         <dt>来源文件</dt><dd><a class="mono" style="font-size:11.5px" href="${esc(f.asset_url)}" target="_blank" rel="noreferrer">${esc(f.asset_url)}</a></dd>
         <dt>行号</dt><dd class="mono">${f.line_no || '—'}</dd>
@@ -1818,7 +1825,8 @@ async function renderSettings() {
             <label class="switch"><input type="checkbox" id="s-probe" ${scan.probe_common_config ? 'checked' : ''}><span class="track"></span>探测常见配置入口</label>
             <label class="switch"><input type="checkbox" id="s-cross" ${scan.allow_cross_origin_js ? 'checked' : ''}><span class="track"></span>允许采集跨域脚本</label>
             <label class="switch"><input type="checkbox" id="s-tls" ${scan.verify_tls ? 'checked' : ''}><span class="track"></span>校验 TLS 证书</label>
-            <label class="switch"><input type="checkbox" id="s-raw" ${scan.store_raw_secrets ? 'checked' : ''}><span class="track"></span>入库保存明文命中值 (默认关闭)</label>
+            <label class="switch"><input type="checkbox" id="s-raw" ${scan.store_raw_secrets ? 'checked' : ''}><span class="track"></span>入库保存明文命中值</label>
+            <label class="switch"><input type="checkbox" id="s-raw-reveal" ${scan.store_raw_reveal ? 'checked' : ''}><span class="track"></span>命中值在界面明文显示（关掉则只显示掩码）</label>
             <label class="switch"><input type="checkbox" id="s-api" ${scan.scan_api_endpoints ? 'checked' : ''}><span class="track"></span>扫描接口响应 (只 GET 同源读接口)</label>
             <label class="switch"><input type="checkbox" id="s-headless" ${scan.headless_render ? 'checked' : ''}><span class="track"></span>无头浏览器渲染页面 (需 Chrome，明显更慢)</label>
           </div>
@@ -2195,6 +2203,7 @@ async function saveScanSettings() {
       max_parallel_targets: Number($('#s-parallel').value || 3),
       tick_seconds: Number($('#s-tick').value || 5),
     },
+    store_raw_reveal: $('#s-raw-reveal').checked,
   };
   // 留空表示"不改动", 避免把已保存的凭据误清掉
   if (Object.keys(extraHeaders).length) payload.scan.extra_headers = extraHeaders;

@@ -353,6 +353,42 @@ def test_settings_exposes_analyzer_config_and_size_limits(client) -> None:
     client.put("/api/settings", json={"scan": {"max_asset_bytes": 0}})
 
 
+def test_raw_value_is_only_returned_when_reveal_is_on(client) -> None:
+    """明文命中值默认不外发; 打开"界面明文显示"后才出现在接口里。"""
+    from app import db
+
+    tid = int(db.execute(
+        "INSERT INTO targets(name, base_url, created_at) VALUES(?,?,?)",
+        ("明文测试站", "http://raw.test/", db.utcnow()),
+    ).lastrowid or 0)
+    fid = int(db.execute(
+        "INSERT INTO findings(target_id, rule_id, rule_name, severity, category, fingerprint, "
+        "match_masked, match_sha256, raw_value, context, line_no, entropy, asset_url, "
+        "first_seen_at, last_seen_at, times_seen, status, verified) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'new','unverified')",
+        (tid, "aws-access-key-id", "AWS Access Key", "high", "cloud",
+         f"fp-raw-{tid}", "AKIA...D4PA(len=20)", "sha-raw", "AKIA3XQ7ZP2LMN4KQ7DA",
+         "const aws = \"AKIA...\"", 1, 4.1, "http://raw.test/a.js",
+         db.utcnow(), db.utcnow()),
+    ).lastrowid or 0)
+    try:
+        db.set_setting("store_raw_reveal", False)
+        body = client.get(f"/api/findings/{fid}").json()
+        assert "raw_value" not in body, "未开启明文显示时不该返回原文"
+        listed = client.get("/api/findings", params={"target_id": tid}).json()["items"]
+        assert listed and "raw_value" not in listed[0]
+
+        db.set_setting("store_raw_reveal", True)
+        body = client.get(f"/api/findings/{fid}").json()
+        assert body["raw_value"] == "AKIA3XQ7ZP2LMN4KQ7DA"
+        listed = client.get("/api/findings", params={"target_id": tid}).json()["items"]
+        assert listed[0]["raw_value"] == "AKIA3XQ7ZP2LMN4KQ7DA"
+    finally:
+        db.set_setting("store_raw_reveal", False)
+        db.execute("DELETE FROM findings WHERE target_id=?", (tid,))
+        db.execute("DELETE FROM targets WHERE id=?", (tid,))
+
+
 def test_analyzer_size_limit_roundtrip(client) -> None:
     res = client.put("/api/settings", json={
         "analyzers": {"run_in_scan": True,

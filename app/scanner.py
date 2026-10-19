@@ -547,8 +547,10 @@ def _upsert_finding(
         reopened = twin["status"] == "resolved"
         db.execute(
             "UPDATE findings SET last_seen_at=?, times_seen=times_seen+1, "
-            "asset_id=COALESCE(?, asset_id), asset_url=?, status=? WHERE id=?",
-            (now, asset_id, asset_url, "new" if reopened else twin["status"], twin["id"]),
+            "asset_id=COALESCE(?, asset_id), asset_url=?, status=?, "
+            "raw_value=COALESCE(raw_value, ?) WHERE id=?",
+            (now, asset_id, asset_url, "new" if reopened else twin["status"],
+             det.raw or None, twin["id"]),
         )
         return False, reopened, int(twin["id"])
 
@@ -557,10 +559,11 @@ def _upsert_finding(
         reopened = existing["status"] == "resolved"
         db.execute(
             "UPDATE findings SET last_seen_at=?, times_seen=times_seen+1, asset_id=COALESCE(?, asset_id), "
-            "asset_url=?, status=?, verified=CASE WHEN ?<>'unverified' THEN ? ELSE verified END "
+            "asset_url=?, status=?, verified=CASE WHEN ?<>'unverified' THEN ? ELSE verified END, "
+            "raw_value=COALESCE(raw_value, ?) "
             "WHERE id=?",
             (now, asset_id, asset_url, "new" if reopened else existing["status"], verified, verified,
-             existing["id"]),
+             det.raw or None, existing["id"]),
         )
         return False, reopened, int(existing["id"])
     new_id = int(db.execute(
@@ -726,6 +729,7 @@ async def _external_analyzer_phase(
 ) -> None:
     """在已采集的资产上并联跑外部分析器, 命中并入同一套发现体系。"""
     config = db.get_setting("analyzers") or {}
+    store_raw = scan_config_from_settings().store_raw_secrets
     summary: dict[str, Any] = {}
     for name, _ in analyzers:
         entry = (config.get("cli_analyzers") or {}).get(name) or {}
@@ -758,7 +762,7 @@ async def _external_analyzer_phase(
                         continue
                     info["hits"] += 1
                     created, fingerprint, payload = _upsert_external_hit(
-                        target_id, url, name, hit)
+                        target_id, url, name, hit, store_raw=store_raw)
                     seen_keys.add(fingerprint)
                     if created:
                         info["new"] += 1
@@ -784,6 +788,7 @@ async def _external_analyzer_phase(
 def _upsert_external_hit(
     target_id: int, asset_url: str, analyzer_name: str, hit: Any,
     channel: str = "cli", found_by_label: str = "",
+    store_raw: bool = False,
 ) -> tuple[bool, str, dict[str, Any]]:
     """外部分析器的命中并入发现体系; 同值已存在则只追加来源归属。"""
     from .rules import mask_value
@@ -806,8 +811,10 @@ def _upsert_external_hit(
             _append_found_by(int(twin["id"]), label)
             reopened = twin["status"] == "resolved"
             db.execute(
-                "UPDATE findings SET last_seen_at=?, times_seen=times_seen+1, status=? WHERE id=?",
-                (now, "new" if reopened else twin["status"], twin["id"]),
+                "UPDATE findings SET last_seen_at=?, times_seen=times_seen+1, status=?, "
+                "raw_value=COALESCE(raw_value, ?) WHERE id=?",
+                (now, "new" if reopened else twin["status"],
+                 (hit.raw or None) if store_raw else None, twin["id"]),
             )
             if reopened:
                 row = db.query_one("SELECT * FROM findings WHERE id=?", (twin["id"],))
@@ -819,12 +826,13 @@ def _upsert_external_hit(
     masked = hit.masked or (mask_value(raw) if raw else "—")
     finding_id = int(db.execute(
         "INSERT INTO findings(target_id, asset_id, rule_id, rule_name, severity, category, fingerprint, "
-        "match_masked, match_sha256, context, line_no, entropy, asset_url, first_seen_at, last_seen_at, "
-        "times_seen, status, verified, origin, found_by) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,1,'new','unverified',?,?)",
+        "match_masked, match_sha256, raw_value, context, line_no, entropy, asset_url, first_seen_at, "
+        "last_seen_at, times_seen, status, verified, origin, found_by) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,1,'new','unverified',?,?)",
         (target_id, asset_id, rule_id, f"[{analyzer_name}] {hit.rule_id}"[:80],
          hit.severity if hit.severity in SEVERITY_ORDER else "medium", "external", fingerprint,
-         masked, digest, (hit.context or "")[:1200], hit.line, asset_url, now, now,
+         masked, digest, (raw or None) if store_raw else None,
+         (hit.context or "")[:1200], hit.line, asset_url, now, now,
          origin, label),
     ).lastrowid or 0)
     return True, fingerprint, {
@@ -891,6 +899,7 @@ async def _target_scanner_phase(
 ) -> None:
     """调起整站型扫描器(JSHawk / JScanner2 等), 把结果并入发现体系。"""
     target_id = int(target["id"])
+    store_raw = scan_config_from_settings().store_raw_secrets
     summary: dict[str, Any] = {}
     for scanner in scanners:
         try:
@@ -913,7 +922,7 @@ async def _target_scanner_phase(
                 continue
             created, fingerprint, payload = _upsert_external_hit(
                 target_id, asset_url, scanner.name, hit,
-                channel="scanner", found_by_label=scanner.name)
+                channel="scanner", found_by_label=scanner.name, store_raw=store_raw)
             seen_keys.add(fingerprint)
             if created:
                 info["new"] += 1

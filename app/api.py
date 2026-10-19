@@ -120,6 +120,7 @@ class SettingsIn(BaseModel):
     discovery: dict[str, Any] | None = None
     analyzers: dict[str, Any] | None = None
     scheduler: dict[str, Any] | None = None
+    store_raw_reveal: bool | None = None      # 接口是否返回明文命中值(配合 scan.store_raw_secrets)
 
 
 class AllowlistIn(BaseModel):
@@ -670,9 +671,12 @@ async def trigger_scan(tid: int, full: bool = Query(default=True)) -> dict[str, 
 
 # ---------------------------------------------------------------- 发现
 
-def _finding_dict(row: Any) -> dict[str, Any]:
+def _finding_dict(row: Any, reveal_raw: bool = False) -> dict[str, Any]:
     keys = row.keys()
     data = {k: row[k] for k in keys}
+    # 明文命中值是敏感数据: 只有显式开启"界面显示明文"才随接口返回
+    if not reveal_raw:
+        data.pop("raw_value", None)
     if "target_name" not in data:
         target = db.query_one("SELECT name, base_url FROM targets WHERE id=?", (row["target_id"],))
         data["target_name"] = target["name"] if target else f"#{row['target_id']}"
@@ -757,7 +761,8 @@ def list_findings(
         f"LEFT JOIN targets t ON t.id = f.target_id {clause} ORDER BY {order} LIMIT ? OFFSET ?",
         (*params, limit, offset),
     )
-    items = [_finding_dict(row) for row in rows]
+    reveal = bool(db.get_setting("store_raw_reveal", False))
+    items = [_finding_dict(row, reveal) for row in rows]
     _attach_reuse_counts(items)
     return {"total": total, "items": items,
             "limit": limit, "offset": offset,
@@ -796,12 +801,14 @@ def export_findings(status: str = "new,open", include_gated: bool = False) -> St
     )
     buffer = io.StringIO()
     writer = csv.writer(buffer)
+    reveal = bool(db.get_setting("store_raw_reveal", False))
     writer.writerow(["站点", "入口", "规则ID", "规则", "等级", "分类", "命中值", "文件地址",
                      "行号", "状态", "验证", "首次发现", "最近出现", "次数"])
     for row in rows:
+        hit = (row["raw_value"] if reveal and row["raw_value"] else row["match_masked"])
         writer.writerow([
             row["target_name"], row["target_url"], row["rule_id"], row["rule_name"],
-            row["severity"], row["category"], row["match_masked"], row["asset_url"],
+            row["severity"], row["category"], hit, row["asset_url"],
             row["line_no"], row["status"], row["verified"], row["first_seen_at"],
             row["last_seen_at"], row["times_seen"],
         ])
@@ -821,9 +828,7 @@ def get_finding(fid: int) -> dict[str, Any]:
         "LEFT JOIN targets t ON t.id = f.target_id WHERE f.id=?", (fid,))
     if row is None:
         raise HTTPException(404, "发现不存在")
-    data = _finding_dict(row)
-    if db.get_setting("store_raw_reveal", False) and row["raw_value"]:
-        data["raw_value"] = row["raw_value"]
+    data = _finding_dict(row, reveal_raw=bool(db.get_setting("store_raw_reveal", False)))
     data["reuse"] = reuse_of(row["match_sha256"], exclude_id=fid)
     return data
 
@@ -1237,6 +1242,7 @@ def get_settings() -> dict[str, Any]:
     scan_payload["credential_headers"] = sorted((scan.extra_headers or {}).keys())
     scan_payload["has_cookies"] = bool(scan.cookies)
     scan_payload["credential_mode"] = "带凭据采集" if (scan.extra_headers or scan.cookies) else "匿名采集"
+    scan_payload["store_raw_reveal"] = bool(db.get_setting("store_raw_reveal", False))
     return {
         "scan": scan_payload,
         "alert": {
@@ -1331,6 +1337,8 @@ def put_settings(payload: SettingsIn) -> dict[str, Any]:
                 target[name] = {**(target.get(name) or {}), **patch}
         current_analyzers["target_scanners"] = target
         db.set_setting("analyzers", current_analyzers)
+    if payload.store_raw_reveal is not None:
+        db.set_setting("store_raw_reveal", bool(payload.store_raw_reveal))
     db.log_event("更新系统设置", kind="settings")
     return get_settings()
 
