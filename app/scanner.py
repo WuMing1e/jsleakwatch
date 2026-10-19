@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import tempfile
 from dataclasses import dataclass, field
@@ -331,14 +332,17 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                     else:
                         if prev and prev.get("recheck"):
                             db.execute("UPDATE assets SET recheck=0 WHERE id=?", (asset_id,))
-                        # 正则检测是纯 CPU: 丢到线程里跑, 别把整个控制台的事件循环堵住
-                        asset_dets = await asyncio.to_thread(
-                            _detect, detector, resp.text, target_id, cand.url,
-                            cfg.store_raw_secrets,
-                        )
+                        # 正则检测是纯 CPU: 丢到线程里跑, 别把整个控制台的事件循环堵住。
+                        # 同时限制并发数: 正则不释放 GIL, 开太多线程只会互相抢, 接口反而更慢。
+                        async with _detect_lock():
+                            asset_dets = await asyncio.to_thread(
+                                _detect, detector, resp.text, target_id, cand.url,
+                                cfg.store_raw_secrets,
+                            )
                         # 接口响应常带时间戳/随机串, 每轮都不一样, 记版本只会把变更流刷满
                         if cand.kind != "api":
-                            recorded = asset_history.record_version(
+                            recorded = await asyncio.to_thread(
+                                asset_history.record_version,
                                 target_id, asset_id, cand.url, resp.text, sha,
                                 secret_hashes=[det.sha256 for det in asset_dets],
                                 findings=len(asset_dets),
@@ -361,14 +365,20 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
 
                     # 展开下一层
                     if cand.kind in ("html", "config"):
-                        for child in extractor.from_html(cand.url, resp.text, cand.depth):
+                        children = await asyncio.to_thread(
+                            extractor.from_html, cand.url, resp.text, cand.depth)
+                        for child in children:
                             next_batch.setdefault(child.url, child)
                         if cand.depth < max_depth:
-                            for page in extractor.pages_from_html(cand.url, resp.text, cand.depth + 1):
+                            pages = await asyncio.to_thread(
+                                extractor.pages_from_html, cand.url, resp.text, cand.depth + 1)
+                            for page in pages:
                                 next_batch.setdefault(page.url, page)
                     elif cand.kind != "api":
                         # 接口响应只扫内容, 不再从里面展开引用（JSON 里的 .js 多半是数据不是引用）
-                        for child in extractor.from_js(cand.url, resp.text, cand.depth):
+                        children = await asyncio.to_thread(
+                            extractor.from_js, cand.url, resp.text, cand.depth)
+                        for child in children:
                             next_batch.setdefault(child.url, child)
 
                 frontier = [c for url, c in next_batch.items() if url not in visited]
@@ -829,6 +839,24 @@ def _upsert_external_hit(
 CONTEXT_WIDTH = 120
 CONTEXT_TEXT_BUDGET = 24 * 1024 * 1024      # 单站最多留多少原文用于截上下文
 CONTEXT_TEXT_MAX_FILE = 2 * 1024 * 1024     # 超过这个大小的文件不留(内存)
+
+# 同时跑几个 CPU 密集的检测线程。Python 的正则不释放 GIL, 并行跑再多也不会更快,
+# 反而会把事件循环饿住 —— 实测 8 个站点并行扫描时, 列表接口偶尔要 2~7 秒才返回,
+# 前端看起来就是"一直加载中"。
+_DETECT_LOCKS: dict[int, asyncio.Semaphore] = {}
+
+
+def _detect_lock() -> asyncio.Semaphore:
+    loop_id = id(asyncio.get_running_loop())
+    lock = _DETECT_LOCKS.get(loop_id)
+    if lock is None:
+        try:
+            limit = max(1, int(os.getenv("JSLW_DETECT_CONCURRENCY", "2")))
+        except ValueError:
+            limit = 2
+        lock = asyncio.Semaphore(limit)
+        _DETECT_LOCKS[loop_id] = lock
+    return lock
 
 
 def _context_around(text: str, raw: str, width: int = CONTEXT_WIDTH) -> str:

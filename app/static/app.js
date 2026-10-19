@@ -177,6 +177,23 @@ function gateBarText(summary) {
 }
 
 async function api(path, options) {
+  const opts = options || {};
+  const method = (opts.method || 'GET').toUpperCase();
+  // GET 幂等: 偶发的网络抖动/服务端短暂拥塞自动重试一次, 别让页面直接掉进"加载失败"
+  const attempts = method === 'GET' ? 2 : 1;
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await apiOnce(path, opts);
+    } catch (err) {
+      lastError = err;
+      if (attempt + 1 < attempts) await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  throw lastError;
+}
+
+async function apiOnce(path, options) {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
@@ -2339,7 +2356,10 @@ async function render() {
   renderNav();
   renderActions(path);
   const view = $('#view');
-  view.innerHTML = '<div class="skeleton">加载中…</div>';
+  // 已经有内容时不要先清空: 扫描期间页面会被 SSE 频繁重绘, 每次清空再填会让人
+  // 觉得"一直加载中"。新数据到了直接替换; 失败则保留旧内容并提示。
+  const hadContent = view.dataset.page === path && view.innerText.trim() !== '';
+  if (!hadContent) view.innerHTML = '<div class="skeleton">加载中…</div>';
   try {
     if (path === 'overview') await renderOverview();
     else if (path === 'targets') await renderTargets();
@@ -2348,8 +2368,11 @@ async function render() {
     else if (path === 'rules') await renderRules();
     else if (path === 'settings') await renderSettings();
     else await renderOverview();
+    view.dataset.page = path;
   } catch (err) {
-    view.innerHTML = `<div class="empty">加载失败：${esc(err.message)}</div>`;
+    if (hadContent) toast('刷新失败: ' + err.message, 'err');
+    else view.innerHTML = `<div class="empty">加载失败：${esc(err.message)}<br>
+      <button class="btn btn-sm" style="margin-top:10px" data-act="reload-page">重试</button></div>`;
   }
 }
 
@@ -2424,6 +2447,7 @@ async function handleAction(el, evt) {
   if (act === 'close-drawer') return closeDrawer();
   if (act === 'close-modal') return closeModal();
   if (act === 'refresh') return refresh();
+  if (act === 'reload-page') return render();
   if (act === 'export') { window.location.href = '/api/findings/export.csv?status=' + encodeURIComponent(state.filters.status || 'new,open'); return; }
 
   if (act === 'add-target') return openTargetModal(null);
