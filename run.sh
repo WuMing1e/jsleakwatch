@@ -3,8 +3,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# 装过一键环境就直接用它, 免得又去猜系统解释器
+if [ -x .venv/bin/python ] && .venv/bin/python -c "import fastapi, uvicorn, httpx" >/dev/null 2>&1; then
+  PY_FAST=".venv/bin/python"
+fi
+
 PY=""
-for candidate in python3.10 python3.11 python3.12 python3 python3.13; do
+for candidate in ${PY_FAST:-} python3.10 python3.11 python3.12 python3 python3.13; do
   if command -v "$candidate" >/dev/null 2>&1; then
     if "$candidate" -c "import fastapi, uvicorn, httpx" >/dev/null 2>&1; then
       PY="$candidate"; break
