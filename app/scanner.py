@@ -539,7 +539,7 @@ def _upsert_finding(
 
     # 值级合并: 同一条凭证已经由别的分析器发现过, 就不再新增一条, 只追加"由谁发现"
     twin = db.query_one(
-        "SELECT id, status FROM findings WHERE target_id=? AND match_sha256=?",
+        "SELECT id, status, severity FROM findings WHERE target_id=? AND match_sha256=?",
         (target_id, det.sha256),
     )
     if twin is not None:
@@ -553,6 +553,14 @@ def _upsert_finding(
             (now, asset_id, asset_url, "new" if reopened else twin["status"],
              det.raw or None, det.context or "", det.context or "", twin["id"]),
         )
+        # 同一把密钥被更"具体"的规则认出来了(例如通用高熵 -> 企业微信 CorpSecret):
+        # 升级规则与等级, 别让它一直挂着 generic 的低等级标签
+        if SEVERITY_ORDER.get(det.severity, 0) > SEVERITY_ORDER.get(twin["severity"], 0):
+            db.execute(
+                "UPDATE findings SET rule_id=?, rule_name=?, severity=?, category=?, "
+                "match_masked=? WHERE id=?",
+                (det.rule_id, det.rule_name, det.severity, det.category, det.masked, twin["id"]),
+            )
         return False, reopened, int(twin["id"])
 
     existing = db.query_one("SELECT id, status FROM findings WHERE fingerprint=?", (det.fingerprint,))

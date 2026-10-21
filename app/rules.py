@@ -34,6 +34,9 @@ class Rule:
     window: int = 80               # keywords 检查窗口 (字符)
     entropy_min: float = 0.0       # 对 secret 计算香农熵的下限
     min_length: int = 0
+    # 按"值的形态"判定: 要求同时包含这些字符类别。
+    # 可选 lower / upper / digit / symbol —— 用来替代"靠字段名关键词"的识别方式。
+    require_classes: tuple[str, ...] = ()
     allowlist: tuple[str, ...] = ()  # 命中值命中这些正则时忽略
     reference: str = ""
     tags: tuple[str, ...] = ()
@@ -192,20 +195,24 @@ RULES: list[Rule] = [
        r"\b(dckr_pat_[A-Za-z0-9\-_]{27,})\b", tags=("docker",)),
     _r("heroku-api-key", "Heroku API Key", "medium", "cloud",
        r"heroku[^\n]{0,40}?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
-       keywords=("heroku",), secret_group=1, tags=("heroku",)),
+       keywords=("heroku",), secret_group=1, entropy_min=2.5,
+       require_classes=("digit",), tags=("heroku",)),
     _r("digitalocean-token", "DigitalOcean Token", "high", "cloud",
        r"\b(dop_v1_[a-f0-9]{64})\b", tags=("digitalocean",)),
     _r("terraform-cloud-token", "Terraform Cloud Token", "high", "cloud",
        r"\b([A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9\-_]{60,})\b", tags=("terraform",)),
     _r("cloudflare-token", "Cloudflare API Token", "high", "cloud",
        r"cloudflare[^\n]{0,60}?([A-Za-z0-9_\-]{40})",
-       keywords=("cloudflare",), secret_group=1, tags=("cloudflare",)),
+       keywords=("cloudflare",), secret_group=1, entropy_min=3.5,
+       require_classes=("lower", "upper", "digit"), tags=("cloudflare",)),
     _r("netlify-token", "Netlify Token", "medium", "cloud",
        r"netlify[^\n]{0,60}?([A-Za-z0-9\-_]{40,})",
-       keywords=("netlify",), secret_group=1, tags=("netlify",)),
+       keywords=("netlify",), secret_group=1, entropy_min=3.5,
+       require_classes=("lower", "upper", "digit"), tags=("netlify",)),
     _r("vercel-token", "Vercel Token", "medium", "cloud",
        r"vercel[^\n]{0,60}?([A-Za-z0-9]{24})",
-       keywords=("vercel",), secret_group=1, tags=("vercel",)),
+       keywords=("vercel",), secret_group=1, entropy_min=3.5,
+       require_classes=("lower", "upper", "digit"), tags=("vercel",)),
     _r("shopify-access-token", "Shopify Access Token", "high", "cloud",
        r"\b(shpat_[a-f0-9]{32})\b", tags=("shopify",)),
 
@@ -222,21 +229,25 @@ RULES: list[Rule] = [
        r"\b(sq0atp-[0-9A-Za-z\-_]{22}|sq0csp-[0-9A-Za-z\-_]{43})\b", tags=("square",)),
     _r("paypal-client-secret", "PayPal Client Secret", "high", "payment",
        r"paypal[^\n]{0,80}?(?:secret|client_secret)[^\n]{0,20}?[:\s=][\"']?([A-Za-z0-9\-_]{40,})",
-       keywords=("paypal",), secret_group=1, tags=("paypal", "payment")),
+       keywords=("paypal",), secret_group=1, entropy_min=3.5,
+       require_classes=("lower", "upper", "digit"), tags=("paypal", "payment")),
 
     # ============ 邮件 / 短信 ============
     _r("sendgrid-api-key", "SendGrid API Key", "high", "email",
        r"\b(SG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43})\b", tags=("sendgrid",)),
     _r("mailgun-api-key", "Mailgun API Key", "medium", "email",
        r"mailgun[^\n]{0,60}?(?:key-)?([0-9a-zA-Z]{32}-?[0-9a-zA-Z]{0,8})",
-       keywords=("mailgun",), secret_group=1, tags=("mailgun",)),
+       keywords=("mailgun",), secret_group=1, entropy_min=3.0,
+       require_classes=("digit",), tags=("mailgun",)),
     _r("mailchimp-api-key", "Mailchimp API Key", "medium", "email",
        r"\b([0-9a-f]{32}-us\d{1,2})\b", tags=("mailchimp",)),
     _r("twilio-account-sid", "Twilio Account SID", "medium", "sms",
-       r"\b(AC[0-9a-fA-F]{32})\b", keywords=("twilio",), tags=("twilio",)),
+       r"\b(AC[0-9a-fA-F]{32})\b", keywords=("twilio",),
+       secret_group=1, entropy_min=2.5, require_classes=("digit",), tags=("twilio",)),
     _r("twilio-auth-token", "Twilio Auth Token", "high", "sms",
        r"twilio[^\n]{0,60}?(?:auth_token|token)[^\n]{0,20}?[:\s=][\"']?([0-9a-f]{32})",
-       keywords=("twilio",), secret_group=1, tags=("twilio",)),
+       keywords=("twilio",), secret_group=1, entropy_min=3.0,
+       require_classes=("digit",), tags=("twilio",)),
 
     # ============ IM / 协作 ============
     _r("slack-token", "Slack Token", "high", "im",
@@ -271,7 +282,8 @@ RULES: list[Rule] = [
        entropy_min=3.0, tags=("tencent", "credential")),
     _r("huawei-cloud-ak", "华为云 AK/SK", "high", "cn-cloud",
        r"(?:huaweicloud|hw_ak|huawei)[^\n]{0,60}?[\"'\s=:]([A-Z0-9]{20})[\"'\s]",
-       keywords=("huawei", "hwcloud"), secret_group=1, tags=("huawei",)),
+       keywords=("huawei", "hwcloud"), secret_group=1, entropy_min=3.0,
+       require_classes=("upper", "digit"), tags=("huawei",)),
     _r("qiniu-ak-sk", "七牛云 AK/SK", "high", "cn-cloud",
        r"(?:qiniu|qbox)[^\n]{0,80}?([A-Za-z0-9_\-]{40})",
        keywords=("qiniu", "qbox", "七牛"), secret_group=1, entropy_min=3.2, tags=("qiniu",)),
@@ -280,24 +292,30 @@ RULES: list[Rule] = [
        keywords=("upyun",), secret_group=1, entropy_min=3.2, tags=("upyun",)),
     _r("baidu-cloud-ak", "百度云 AK/SK", "high", "cn-cloud",
        r"(?:baidubce|bce_ak|baidu)[^\n]{0,60}?[\"'\s=:]([A-Za-z0-9]{32})[\"'\s]",
-       keywords=("baidu", "bce", "百度"), secret_group=1, tags=("baidu",)),
+       keywords=("baidu", "bce", "百度"), secret_group=1, entropy_min=3.5,
+       require_classes=("lower", "upper", "digit"), tags=("baidu",)),
     _r("jpush-app-key", "极光推送 AppKey/MasterSecret", "medium", "cn-cloud",
        r"(?:jpush|jiguang)[^\n]{0,80}?([0-9a-f]{24})",
-       keywords=("jpush", "jiguang", "极光"), secret_group=1, tags=("jpush",)),
+       keywords=("jpush", "jiguang", "极光"), secret_group=1, entropy_min=3.0,
+       require_classes=("digit",), tags=("jpush",)),
 
     # ============ 国内地图 / 语音 / 风控 ============
     _r("amap-key", "高德地图 Key", "medium", "cn-service",
        r"(?:amap|高德|gaode)[^\n]{0,60}?([0-9a-f]{32})",
-       keywords=("amap", "gaode", "高德"), secret_group=1, tags=("amap",)),
+       keywords=("amap", "gaode", "高德"), secret_group=1, entropy_min=3.0,
+       require_classes=("digit",), tags=("amap",)),
     _r("tencent-lbs-key", "腾讯位置服务 Key", "medium", "cn-service",
        r"(?:apis\.map\.qq|lbs\.qq|tencentmap)[^\n]{0,80}?key=([A-Za-z0-9\-_]{20,})",
-       keywords=("map.qq", "lbs.qq", "tencentmap"), secret_group=1, tags=("qqmap",)),
+       keywords=("map.qq", "lbs.qq", "tencentmap"), secret_group=1, entropy_min=3.5,
+       require_classes=("lower", "upper", "digit"), tags=("qqmap",)),
     _r("baidu-map-ak", "百度地图 AK", "medium", "cn-service",
        r"(?:api\.map\.baidu\.com|baidumap)[^\n]{0,80}?ak=([A-Za-z0-9]{24,})",
-       keywords=("map.baidu", "baidumap", "百度地图"), secret_group=1, tags=("baidumap",)),
+       keywords=("map.baidu", "baidumap", "百度地图"), secret_group=1, entropy_min=3.5,
+       require_classes=("lower", "upper", "digit"), tags=("baidumap",)),
     _r("xfyun-credentials", "科大讯飞 AppId/Key/Secret", "high", "cn-service",
        r"(?:xfyun|iflytek|讯飞)[^\n]{0,100}?([0-9a-f]{8})",
-       keywords=("xfyun", "iflytek", "讯飞"), secret_group=1, tags=("iflytek",)),
+       keywords=("xfyun", "iflytek", "讯飞"), secret_group=1, entropy_min=2.5,
+       require_classes=("digit",), tags=("iflytek",)),
 
     # ============ 微信 / 支付宝 ============
     _r("wechat-appsecret", "微信 AppSecret", "critical", "cn-payment",
@@ -310,7 +328,8 @@ RULES: list[Rule] = [
        entropy_min=3.0, tags=("wechatpay",)),
     _r("alipay-private-key", "支付宝应用私钥", "critical", "cn-payment",
        r"MIIEv[QwT][A-Za-z0-9+/=\s]{80,}",
-       keywords=("alipay", "支付宝", "private_key", "app_private"), tags=("alipay",)),
+       keywords=("alipay", "支付宝", "private_key", "app_private"),
+       entropy_min=3.5, tags=("alipay",)),
 
     # ============ 飞书 / 钉钉 / 企业微信 ============
     _r("feishu-webhook", "飞书自定义机器人 Webhook", "high", "im",
@@ -329,8 +348,23 @@ RULES: list[Rule] = [
        r"https://qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?key=[A-Za-z0-9\-]{30,}",
        tags=("wecom",)),
     _r("wecom-corpsecret", "企业微信 CorpSecret", "critical", "im",
-       r"(?:corpsecret|qyapi|企业微信)[^\n]{0,60}?[\"'\s=:]([A-Za-z0-9\-_]{43})[\"'\s]",
-       keywords=("corpsecret", "qyapi", "wecom"), secret_group=1, tags=("wecom",)),
+       # 企业微信的密钥字段名五花八门: corpsecret / corp_secret / WECHAT_SECRET /
+       # WECHAT_CORPSECRET / WECOM_SECRET 都见过。原来只认 corpsecret/qyapi, 结果
+       # VITE_PROJECT_WECHAT_SECRET 这种最写法没命中(实测 qw-app-dev 上的 CorpSecret)。
+       r"(?i)(?:corp_?secret|wechat_?corp_?secret|wechat_?secret|wecom_?secret|qyapi|企业微信)"
+       r"[^\n]{0,80}?[\"'\s=:]([A-Za-z0-9\-_]{43})[\"'\s]",
+       keywords=("corpsecret", "corp_secret", "qyapi", "wecom", "wechat_secret",
+                 "wechat-secret", "wechat_corpsecret", "企业微信"),
+       secret_group=1, entropy_min=4.0,
+       require_classes=("lower", "upper", "digit"), tags=("wecom",)),
+    # 按"值的形态"兜底: 不依赖字段名。企业微信 CorpSecret 固定 43 位、大小写与数字混排、
+    # 熵值约 4.9, 且总是出现在赋值位置(冒号/等号后带引号)。字段叫 WECHAT_SECRET 也好,
+    # 叫别的也罢, 形态对得上就能命中。纯小写 slug、纯数字 ID、低熵串会被类别/熵值挡掉。
+    _r("credential-shape-43", "疑似 43 位随机密钥（企业微信 CorpSecret 形态）", "high", "im",
+       r"""[:=]\s*["']([A-Za-z0-9_-]{43})["']""",
+       description="长度 43、大小写与数字混排、高熵，且处于赋值位置；不依赖字段名。",
+       secret_group=1, entropy_min=4.0,
+       require_classes=("lower", "upper", "digit"), tags=("wecom", "shape")),
 
     # ============ 私有密钥 / 凭据串 ============
     _r("private-key-block", "私钥文件内容", "critical", "private-key",
@@ -350,18 +384,23 @@ RULES: list[Rule] = [
        tags=("jwt",)),
     _r("supabase-service-role", "Supabase service_role 密钥", "critical", "cloud",
        r"service_role[^\n]{0,40}?(eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,})",
-       keywords=("service_role", "supabase"), secret_group=1, tags=("supabase",)),
+       keywords=("service_role", "supabase"), secret_group=1, entropy_min=3.5,
+       tags=("supabase",)),
     _r("notion-token", "Notion 集成密钥", "high", "saas",
        r"\b(secret_[A-Za-z0-9]{40,}|ntn_[A-Za-z0-9]{40,})\b", tags=("notion",)),
     _r("airtable-key", "Airtable API Key", "medium", "saas",
-       r"\b(key[A-Za-z0-9]{14}|pat[A-Za-z0-9]{14}\.[A-Za-z0-9]{64})\b", tags=("airtable",)),
+       r"\b(key[A-Za-z0-9]{14}|pat[A-Za-z0-9]{14}\.[A-Za-z0-9]{64})\b",
+       # 原来的 key+14 位太宽: keyframeAnimation 这种 CSS 名字也会中(实测 27 条全误报)
+       entropy_min=3.6, require_classes=("digit",), tags=("airtable",)),
     _r("linear-api-key", "Linear API Key", "medium", "saas",
        r"\b(lin_api_[A-Za-z0-9]{40})\b", tags=("linear",)),
     _r("clerk-secret", "Clerk Secret Key", "high", "saas",
-       r"\b(sk_(?:live|test)_[A-Za-z0-9]{24,})\b", keywords=("clerk",), tags=("clerk",)),
+       r"\b(sk_(?:live|test)_[A-Za-z0-9]{24,})\b", keywords=("clerk",), secret_group=1,
+       entropy_min=3.5, require_classes=("lower", "upper", "digit"), tags=("clerk",)),
     _r("algolia-admin-key", "Algolia Admin Key", "high", "saas",
        r"algolia[^\n]{0,80}?(?:admin|api)[^\n]{0,20}?[\"'\s=:]([A-Za-z0-9]{32})[\"'\s]",
-       keywords=("algolia",), secret_group=1, tags=("algolia",)),
+       keywords=("algolia",), secret_group=1, entropy_min=3.5,
+       require_classes=("lower", "upper", "digit"), tags=("algolia",)),
     _r("mapbox-token", "Mapbox 访问令牌", "medium", "saas",
        r"\b((?:pk|sk)\.[A-Za-z0-9\-_]{60,})\b", tags=("mapbox",)),
     _r("sentry-dsn", "Sentry DSN", "info", "saas",
@@ -378,7 +417,8 @@ RULES: list[Rule] = [
        secret_group=1, tags=("sourcemap",)),
     _r("internal-ip", "内网地址泄露", "low", "exposure",
        r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?::\d{2,5})?\b",
-       description="可作为后续内网渗透的入口信息。", tags=("exposure",)),
+       description="可作为后续内网渗透的入口信息。",
+       min_length=7, tags=("exposure",)),
     _r("generic-secret-assignment", "疑似硬编码密钥 (上下文匹配)", "high", "generic",
        r"""(?i)\b(?:api[_-]?key|secret[_-]?key|secretkey|access[_-]?key|auth[_-]?token|access[_-]?token|client[_-]?secret|private[_-]?key|app[_-]?secret|api[_-]?secret|webhook[_-]?secret|signing[_-]?secret|sign[_-]?key|authkey|passwd|password|credential)\b[\"']?\s*[:=]\s*[\"']([A-Za-z0-9+/=_\-.]{16,200})[\"']""",
        secret_group=1, entropy_min=3.4,
@@ -400,16 +440,18 @@ RULES: list[Rule] = [
        description="令牌里直接拼了 LOGIN/AUTH 等语义段, 常见于内部系统的长期访问凭证。",
        secret_group=1, tags=("token", "internal")),
     _r("env-var-leak", "构建期环境变量内联泄露", "medium", "exposure",
-       r"""(?i)"(?:REACT_APP|VITE|NEXT_PUBLIC|VUE_APP|NUXT_ENV)_[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*"\s*:\s*"([^"]{8,200})""",
+       # 键名两边的引号是可选的: 压缩后的产物常见 {VITE_X_SECRET:"..."} 这种写法
+       r"""(?i)["']?(?:REACT_APP|VITE|NEXT_PUBLIC|VUE_APP|NUXT_ENV)_[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*["']?\s*[:=]\s*["']([^"']{8,200})["']""",
        secret_group=1, tags=("exposure",)),
 
     # ============ 个人信息 (默认关闭, 合规风险) ============
     _r("cn-mobile-number", "中国大陆手机号", "low", "pii",
-       r"(?<!\d)(1[3-9]\d{9})(?!\d)",
+       r"(?<!\d)(1[3-9]\d{9})(?!\d)", secret_group=1, min_length=11,
        description="默认关闭: 涉及个人信息, 仅在获得授权时启用。",
        tags=("pii",), default_enabled=False),
     _r("cn-id-card", "中国大陆身份证号", "medium", "pii",
        r"(?<!\d)([1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx])(?!\d)",
+       secret_group=1, min_length=18,
        description="默认关闭: 涉及个人信息, 仅在获得授权时启用。",
        tags=("pii",), default_enabled=False),
 ]
@@ -448,6 +490,23 @@ def looks_like_base64_fragment(text: str, raw: str, start: int | None = None) ->
     if index <= 0 or index + len(raw) >= len(text):
         return False
     return bool(_BASE64_CHAR.match(text[index - 1]) and _BASE64_CHAR.match(text[index + len(raw)]))
+
+
+def has_required_classes(value: str, classes: tuple[str, ...]) -> bool:
+    """检查命中值是否同时具备指定的字符类别(lower/upper/digit/symbol)。
+
+    这是"按形态识别"的基础: 企业微信 CorpSecret 这类 43 位随机串一定是大小写+数字混排,
+    而普通标识符、纯小写 slug、纯数字 ID 会被挡掉 —— 不依赖字段名叫什么。
+    """
+    if not classes:
+        return True
+    checks = {
+        "lower": any(ch.islower() for ch in value),
+        "upper": any(ch.isupper() for ch in value),
+        "digit": any(ch.isdigit() for ch in value),
+        "symbol": any(not ch.isalnum() for ch in value),
+    }
+    return all(checks.get(name, False) for name in classes)
 
 
 def explain_rule(rule: Rule, text: str, allowlist: Iterable[str] = (), limit: int = 20) -> dict:
@@ -507,6 +566,9 @@ def explain_rule(rule: Rule, text: str, allowlist: Iterable[str] = (), limit: in
         entropy = shannon_entropy(raw)
         if rule.entropy_min and entropy < rule.entropy_min:
             reject(f"熵值低于 {rule.entropy_min}")
+            continue
+        if rule.require_classes and not has_required_classes(raw, rule.require_classes):
+            reject("字符类别不满足要求")
             continue
         if any(item.search(raw) for item in allowed) or any(item.search(raw) for item in rule.allowlist):
             reject("命中白名单")
@@ -630,6 +692,8 @@ class Detector:
                         continue
                 entropy = shannon_entropy(raw)
                 if rule.entropy_min and entropy < rule.entropy_min:
+                    continue
+                if rule.require_classes and not has_required_classes(raw, rule.require_classes):
                     continue
                 if self._is_allowlisted(raw, rule):
                     continue

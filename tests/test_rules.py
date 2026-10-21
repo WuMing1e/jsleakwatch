@@ -133,6 +133,44 @@ def test_entropy_helper() -> None:
     assert looks_placeholder("null")
 
 
+def test_every_rule_has_value_feature_or_literal_prefix() -> None:
+    """所有规则都要"关键字 + 特征"或"字面前缀 + 特征", 不能只靠字段名。"""
+    import re
+
+    from app.rules import RULES
+
+    def has_feature(rule) -> bool:
+        return bool(rule.entropy_min or rule.require_classes or rule.min_length)
+
+    def literal_len(pattern: str) -> int:
+        return max((len(m.group(0)) for m in re.finditer(r"[A-Za-z0-9_\-]{2,}", pattern)),
+                   default=0)
+
+    for rule in RULES:
+        if rule.keywords:
+            assert has_feature(rule), f"{rule.id}: 关键词规则必须带值特征(熵/字符类别/长度)"
+        else:
+            assert has_feature(rule) or literal_len(rule.pattern) >= 4, \
+                f"{rule.id}: 既没有值特征, 也没有 4 位以上的字面前缀"
+
+
+def test_wecom_corpsecret_is_matched_by_shape_not_field_name() -> None:
+    from app.rules import Detector
+
+    value = "dhV2Rlgmkz8QyjiLW4ZlfsAWKrFrbedb5mOHLz2eBYk"
+    # 字段名完全不相干, 只靠值形态也要命中
+    hits = Detector().scan_text(f'x:{{v:"{value}"}}', target_id=0, asset_url="http://x/a.js")
+    assert any(d.rule_id == "credential-shape-43" for d in hits), [d.rule_id for d in hits]
+    # 字段名带企业微信语义时, 升级为专用的 critical 规则
+    hits = Detector().scan_text(f'WECHAT_SECRET:"{value}"', target_id=0, asset_url="http://x/a.js")
+    assert any(d.rule_id == "wecom-corpsecret" and d.severity == "critical" for d in hits)
+    # 形态不符(纯小写/纯数字/低熵)不该命中
+    for text in ('k:"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopq"',
+                 'n:"1234567890123456789012345678901234567890123"',
+                 'x:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'):
+        assert not Detector().scan_text(text, target_id=0, asset_url="http://x/a.js")
+
+
 def test_context_of_minified_code_keeps_the_match() -> None:
     """压缩代码里没有空格: 以前"去掉开头残片"会把整段(连同命中值)砍掉。"""
     from app.rules import Detector

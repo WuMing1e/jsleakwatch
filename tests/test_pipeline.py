@@ -452,6 +452,40 @@ def _new_target(db, base_url: str) -> dict:
     return {k: row[k] for k in row.keys()}
 
 
+def test_same_secret_is_upgraded_to_a_more_specific_rule(prepared) -> None:
+    """同一把密钥先被通用规则(低等级)命中, 后来被专用规则(高等级)识别时, 要升级而不是并存。"""
+    import hashlib
+
+    from app.rules import Detection
+    from app.scanner import _upsert_finding
+
+    _target, db = prepared
+    tid = int(db.execute(
+        "INSERT INTO targets(name, base_url, created_at) VALUES(?,?,?)",
+        ("升级测试", "http://up.test/", db.utcnow()),
+    ).lastrowid or 0)
+    value = "dhV2Rlgmkz8QyjiLW4ZlfsAWKrFrbedb5mOHLz2eBYk"
+    digest = hashlib.sha256(value.encode()).hexdigest()
+    fid = int(db.execute(
+        "INSERT INTO findings(target_id, rule_id, rule_name, severity, category, fingerprint, "
+        "match_masked, match_sha256, context, line_no, entropy, asset_url, first_seen_at, last_seen_at, "
+        "times_seen, status, verified) VALUES(?,?,?,?,?,?,?,?,?,1,4.9,?,?,?,1,'open','unverified')",
+        (tid, "high-entropy-string", "高熵字符串", "low", "secret", "fp-up", "dhV2...eBYk(len=43)",
+         digest, "ctx", "http://up.test/a.js", db.utcnow(), db.utcnow()),
+    ).lastrowid or 0)
+
+    specific = Detection(
+        rule_id="wecom-corpsecret", rule_name="企业微信 CorpSecret", severity="critical",
+        category="im", raw=value, masked="dhV2...eBYk(len=43)", sha256=digest, entropy=4.9,
+        line_no=1, context="WECHAT_SECRET:\"...\"", fingerprint="fp-new",
+    )
+    created, _reopened, returned = _upsert_finding(tid, None, "http://up.test/a.js", specific)
+    assert created is False and returned == fid, "同一把值不该新建记录"
+    row = db.query_one("SELECT rule_id, severity, match_sha256 FROM findings WHERE id=?", (fid,))
+    assert row["rule_id"] == "wecom-corpsecret" and row["severity"] == "critical"
+    assert row["match_sha256"] == digest, "升级不该改变值指纹"
+
+
 def test_render_failure_is_a_warning_not_a_scan_failure(prepared, monkeypatch) -> None:
     """无头渲染是"可选增强": 它失败不该把整站标成"部分成功"。"""
     import asyncio
