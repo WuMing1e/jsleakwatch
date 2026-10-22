@@ -229,6 +229,57 @@ def test_triage_sends_raw_when_explicitly_enabled() -> None:
     assert "AIzaSyB3kQ9mZx2VnPr7YqW3FbC8dE1fG4hI6jK" in captured["body"]["messages"][-1]["content"]
 
 
+def test_triage_prompt_includes_decoded_preview() -> None:
+    """发明文时, 可逆编码要先还原并写进 prompt, 让模型基于还原结果判断。"""
+    import base64
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return chat_response('{"verdict":"real","confidence":0.9}')
+
+    payload = base64.b64encode(b'{"corpsecret":"real-secret-value"}').decode()
+    client = ai.AIClient(cfg(send_raw=True), transport=make_transport(handler))
+    run(ai.triage_finding(client, _finding_row(), raw=payload))
+    prompt = captured["body"]["messages"][-1]["content"]
+    assert "自动预还原" in prompt
+    assert "Base64 解码" in prompt
+    assert "real-secret-value" in prompt
+    # 系统提示要明确要求"先看上下文定角色 + 先解密再研判"
+    system = captured["body"]["messages"][0]["content"]
+    assert "先定角色" in system and "再还原内容" in system
+
+
+def test_triage_does_not_leak_decoded_value_when_raw_disabled() -> None:
+    import base64
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return chat_response('{"verdict":"real","confidence":0.9}')
+
+    payload = base64.b64encode(b'{"corpsecret":"real-secret-value"}').decode()
+    client = ai.AIClient(cfg(send_raw=False), transport=make_transport(handler))
+    run(ai.triage_finding(client, _finding_row(), raw=payload))
+    prompt = captured["body"]["messages"][-1]["content"]
+    assert "自动预还原" not in prompt
+    assert "real-secret-value" not in prompt
+
+
+def test_decode_preview_handles_common_encodings() -> None:
+    import base64
+
+    jwt = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+           "eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJhZG1pbiJ9.abc123")
+    assert "JWT 解码" in ai.decode_preview(jwt)
+    assert "Base64 解码" in ai.decode_preview(base64.b64encode(b'{"api_key":"x"}').decode())
+    assert "Hex 解码" in ai.decode_preview("7b226b6579223a2276616c7565227d")
+    assert "URL 解码" in ai.decode_preview("%7B%22token%22%3A%22abc%22%7D")
+    assert ai.decode_preview("dhV2Rlgmkz8QyjiLW4ZlfsAWKrFrbedb5mOHLz2eBYk") == ""
+
+
 def test_triage_degrades_gracefully_on_bad_output() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return chat_response("模型今天不想说话")
