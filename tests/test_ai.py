@@ -280,6 +280,41 @@ def test_decode_preview_handles_common_encodings() -> None:
     assert ai.decode_preview("dhV2Rlgmkz8QyjiLW4ZlfsAWKrFrbedb5mOHLz2eBYk") == ""
 
 
+def test_extract_json_tolerates_common_model_mistakes() -> None:
+    """模型常把 JSON 写坏: 尾逗号 / 中文引号 / 字符串里裸换行, 都要能救回来。"""
+    assert ai.extract_json('{"verdict":"real","confidence":0.9,}')["verdict"] == "real"
+    assert ai.extract_json("{\u201cverdict\u201d:\u201creal\u201d}")["verdict"] == "real"
+    assert ai.extract_json('{"verdict":"real","reason":"line1\nline2"}')["reason"] == "line1\nline2"
+
+
+def test_triage_retries_once_when_json_is_broken() -> None:
+    """第一次返回残缺 JSON 时, 自动重问一次; 第二次正常就正常出结论。"""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return chat_response('{"verdict":"real", "confidence":')
+        return chat_response('{"verdict":"real","confidence":0.88,"reason":"ok"}')
+
+    client = ai.AIClient(cfg(), transport=make_transport(handler))
+    verdict = run(ai.triage_finding(client, _finding_row(), raw=""))
+    assert verdict["verdict"] == "real" and verdict["confidence"] == 0.88
+    assert calls["n"] == 2, "应重问一次"
+    assert client.errors == []
+
+
+def test_triage_reports_parse_failure_after_retry() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return chat_response('{"verdict":')
+
+    client = ai.AIClient(cfg(), transport=make_transport(handler))
+    verdict = run(ai.triage_finding(client, _finding_row(), raw=""))
+    assert verdict["verdict"] == "uncertain" and verdict.get("failed") is True
+    assert "JSON" in verdict["reason"]
+    assert client.errors, "失败的原始输出要记下来, 方便排查"
+
+
 def test_triage_degrades_gracefully_on_bad_output() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return chat_response("模型今天不想说话")

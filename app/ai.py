@@ -178,8 +178,34 @@ def extract_json(text: str, expect: str = "object") -> Any:
         elif char in "}]":
             depth -= 1
             if depth == 0:
-                return json.loads(cleaned[start:index + 1])
+                return _loads_lenient(cleaned[start:index + 1])
     raise ValueError("JSON 不完整")
+
+
+def _loads_lenient(raw: str) -> Any:
+    """解析模型输出的 JSON, 容忍常见的"差一点就合法":
+
+    - 尾逗号: {"a": 1,}
+    - 字符串里有裸换行(严格模式会拒绝)
+    - 中文引号 “ ” 代替了英文引号
+
+    仍解析不了就抛最后一次的 JSONDecodeError, 由调用方决定是否重问模型。
+    """
+    candidates = [raw]
+    no_trailing = re.sub(r",\s*([}\]])", r"\1", raw)
+    if no_trailing != raw:
+        candidates.append(no_trailing)
+    if "\u201c" in raw or "\u201d" in raw:
+        fixed = no_trailing.replace("\u201c", '"').replace("\u201d", '"')
+        candidates.append(fixed)
+    last: Exception | None = None
+    for candidate in candidates:
+        for strict in (True, False):
+            try:
+                return json.loads(candidate, strict=strict)
+            except json.JSONDecodeError as exc:
+                last = exc
+    raise last or ValueError("JSON 解析失败")
 
 
 def normalize_triage(data: dict[str, Any]) -> dict[str, Any]:
@@ -680,11 +706,27 @@ async def triage_finding(client: AIClient, row: dict[str, Any],
     prompt = _finding_prompt(payload, context)
     try:
         text = await client.chat(TRIAGE_SYSTEM, prompt)
-        return {**normalize_triage(extract_json(text, "object")), "model": client.cfg.model}
-    except (AIError, ValueError, json.JSONDecodeError) as exc:
+    except AIError as exc:
         client.errors.append(str(exc)[:200])
         return {"verdict": "uncertain", "confidence": 0.0, "reason": f"AI 复核失败: {str(exc)[:160]}",
                 "model": client.cfg.model, "failed": True}
+    try:
+        data = extract_json(text, "object")
+    except (ValueError, json.JSONDecodeError) as exc:
+        # 模型偶尔把 JSON 写坏(尾逗号/中文引号/截断)。先让它照着错误重写一次,
+        # 还不行才降级 —— 不能因为格式问题就把一条真凭证判成"未复核"。
+        try:
+            retry = prompt + (
+                f"\n\n上一次输出无法解析为 JSON（{str(exc)[:80]}）。"
+                "请重新只输出一个合法的 JSON 对象, 不要代码块、不要多余文字。")
+            text2 = await client.chat(TRIAGE_SYSTEM, retry)
+            data = extract_json(text2, "object")
+        except (AIError, ValueError, json.JSONDecodeError) as exc2:
+            client.errors.append(f"{str(exc2)[:140]} | 原始输出: {text[:120]}")
+            return {"verdict": "uncertain", "confidence": 0.0,
+                    "reason": f"AI 复核失败(JSON 无法解析): {str(exc2)[:140]}",
+                    "model": client.cfg.model, "failed": True}
+    return {**normalize_triage(data), "model": client.cfg.model}
 
 
 async def semantic_scan_text(client: AIClient, text: str, url: str,
