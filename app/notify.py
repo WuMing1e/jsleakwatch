@@ -238,7 +238,7 @@ class FeishuNotifier:
             "header": {
                 "template": SEVERITY_TEMPLATE.get(severity, "grey"),
                 "title": {"tag": "plain_text",
-                          "content": f"{'复现' if item.get('reopened') else '发现'}硬编码凭证 · {self._short(site, 34)}"},
+                          "content": f"{'复现' if item.get('reopened') else ('规则升级' if item.get('upgraded') else '发现')}硬编码凭证 · {self._short(site, 34)}"},
             },
             "elements": elements,
         }

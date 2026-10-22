@@ -479,8 +479,10 @@ def test_same_secret_is_upgraded_to_a_more_specific_rule(prepared) -> None:
         category="im", raw=value, masked="dhV2...eBYk(len=43)", sha256=digest, entropy=4.9,
         line_no=1, context="WECHAT_SECRET:\"...\"", fingerprint="fp-new",
     )
-    created, _reopened, returned = _upsert_finding(tid, None, "http://up.test/a.js", specific)
+    created, _reopened, returned, upgraded = _upsert_finding(
+        tid, None, "http://up.test/a.js", specific)
     assert created is False and returned == fid, "同一把值不该新建记录"
+    assert upgraded is True, "被更具体的规则识别时应标记为升级(这样才会重新进告警队列)"
     row = db.query_one("SELECT rule_id, severity, match_sha256 FROM findings WHERE id=?", (fid,))
     assert row["rule_id"] == "wecom-corpsecret" and row["severity"] == "critical"
     assert row["match_sha256"] == digest, "升级不该改变值指纹"

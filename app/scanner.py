@@ -401,11 +401,13 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
         for asset_url, kind, det in detections:
             row = db.query_one("SELECT id FROM assets WHERE target_id=? AND url=?", (target_id, asset_url))
             asset_id = row["id"] if row else None
-            is_new, reopened, finding_id = _upsert_finding(target_id, asset_id, asset_url, det)
+            is_new, reopened, finding_id, upgraded = _upsert_finding(
+                target_id, asset_id, asset_url, det)
             seen_keys.add(det.fingerprint)
-            if is_new or reopened:
+            if is_new or reopened or upgraded:
                 result.new_findings.append(
-                    _finding_payload(target_id, det, asset_url, reopened, finding_id))
+                    _finding_payload(target_id, det, asset_url, reopened, finding_id,
+                                     upgraded=upgraded))
 
         semantic_ran = False
         if ai_cfg.enabled:
@@ -532,8 +534,12 @@ def mark_assets_for_recheck(rows: Iterable[Any]) -> int:
 
 def _upsert_finding(
     target_id: int, asset_id: int | None, asset_url: str, det: Detection
-) -> tuple[bool, bool, int]:
-    """返回 (是否新增, 是否复现, 记录 id)。"""
+) -> tuple[bool, bool, int, bool]:
+    """返回 (是否新增, 是否复现, 记录 id, 是否规则升级)。
+
+    `规则升级` 指同一把值先被通用规则(低等级)命中、这次被更具体的规则(高等级)识别。
+    它既不是新增也不是复现, 但对告警来说同等重要 —— 否则升级后的 critical 永远不会推。
+    """
     now = db.utcnow()
     verified = passive_verify(det.rule_id, det.raw) if det.raw else "unverified"
 
@@ -555,13 +561,14 @@ def _upsert_finding(
         )
         # 同一把密钥被更"具体"的规则认出来了(例如通用高熵 -> 企业微信 CorpSecret):
         # 升级规则与等级, 别让它一直挂着 generic 的低等级标签
-        if SEVERITY_ORDER.get(det.severity, 0) > SEVERITY_ORDER.get(twin["severity"], 0):
+        upgraded = SEVERITY_ORDER.get(det.severity, 0) > SEVERITY_ORDER.get(twin["severity"], 0)
+        if upgraded:
             db.execute(
                 "UPDATE findings SET rule_id=?, rule_name=?, severity=?, category=?, "
                 "match_masked=? WHERE id=?",
                 (det.rule_id, det.rule_name, det.severity, det.category, det.masked, twin["id"]),
             )
-        return False, reopened, int(twin["id"])
+        return False, reopened, int(twin["id"]), upgraded
 
     existing = db.query_one("SELECT id, status FROM findings WHERE fingerprint=?", (det.fingerprint,))
     if existing:
@@ -575,7 +582,7 @@ def _upsert_finding(
             (now, asset_id, asset_url, "new" if reopened else existing["status"], verified, verified,
              det.raw or None, det.context or "", det.context or "", existing["id"]),
         )
-        return False, reopened, int(existing["id"])
+        return False, reopened, int(existing["id"]), False
     new_id = int(db.execute(
         "INSERT INTO findings(target_id, asset_id, rule_id, rule_name, severity, category, fingerprint, "
         "match_masked, match_sha256, raw_value, context, line_no, entropy, asset_url, first_seen_at, "
@@ -585,7 +592,7 @@ def _upsert_finding(
          det.masked, det.sha256, det.raw or None, det.context, det.line_no, det.entropy, asset_url,
          now, now, verified, "builtin"),
     ).lastrowid or 0)
-    return True, False, new_id
+    return True, False, new_id, False
 
 
 def _append_found_by(finding_id: int, label: str) -> None:
@@ -601,7 +608,8 @@ def _append_found_by(finding_id: int, label: str) -> None:
 
 
 def _finding_payload(
-    target_id: int, det: Detection, asset_url: str, reopened: bool, finding_id: int = 0
+    target_id: int, det: Detection, asset_url: str, reopened: bool, finding_id: int = 0,
+    upgraded: bool = False,
 ) -> dict[str, Any]:
     return {
         "id": finding_id,
@@ -616,6 +624,7 @@ def _finding_payload(
         "context": det.context,
         "line_no": det.line_no,
         "reopened": reopened,
+        "upgraded": upgraded,
     }
 
 
