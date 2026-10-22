@@ -1167,9 +1167,14 @@ async function openFinding(id) {
   const context = f.context || '';
   const masked = f.match_masked || '';
   const head = masked.split('...')[0] || '';
-  const marked = head && context.includes(head)
-    ? context.replace(head, `<mark>${esc(head)}</mark>`)
-    : esc(context);
+  // 先整体转义、再在转义后的文本里高亮。之前是"先 replace 再显示", 命中值存在时
+  // 整段 context 不转义 —— 被扫描页面里的 <link>/<script> 会被浏览器当成真标签解析,
+  // 既把上下文显示成残片(实测只剩 "-->"), 也是存储型 XSS。
+  const escapedContext = esc(context);
+  const escapedHead = esc(head);
+  const marked = escapedHead && escapedContext.includes(escapedHead)
+    ? escapedContext.replace(escapedHead, `<mark>${escapedHead}</mark>`)
+    : escapedContext;
   $('#drawer').innerHTML = `
     <div class="drawer-head">
       <div>
