@@ -14,6 +14,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urljoin, urlparse
 
 from . import ai, asset_history, db, gating
 from .config import SETTINGS, ScanConfig
@@ -375,11 +376,18 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                             for page in pages:
                                 next_batch.setdefault(page.url, page)
                     elif cand.kind != "api":
-                        # 接口响应只扫内容, 不再从里面展开引用（JSON 里的 .js 多半是数据不是引用）
                         children = await asyncio.to_thread(
                             extractor.from_js, cand.url, resp.text, cand.depth)
                         for child in children:
                             next_batch.setdefault(child.url, child)
+                    else:
+                        # 接口响应默认只扫内容; 但微前端/低代码平台的 widget 清单是一份 JSON,
+                        # 里面引用的同源 .js 必须补进队列, 否则这些按需加载的包永远扫不到。
+                        for child_url in _js_urls_from_json(
+                                resp.text, cand.url, target["base_url"]):
+                            next_batch.setdefault(child_url, Candidate(
+                                url=child_url, kind="script", depth=cand.depth,
+                                label="接口清单引用的脚本"))
 
                 frontier = [c for url, c in next_batch.items() if url not in visited]
 
@@ -868,6 +876,60 @@ def _upsert_external_hit(
 CONTEXT_WIDTH = 120
 CONTEXT_TEXT_BUDGET = 24 * 1024 * 1024      # 单站最多留多少原文用于截上下文
 CONTEXT_TEXT_MAX_FILE = 2 * 1024 * 1024     # 超过这个大小的文件不留(内存)
+
+JSON_JS_LIMIT = 50        # 一份接口清单最多补多少个脚本, 防止无限膨胀
+
+
+def _js_urls_from_json(text: str, base_url: str, site_url: str,
+                       limit: int = JSON_JS_LIMIT) -> list[str]:
+    """从接口返回的 JSON 清单里挖出同源 .js 地址。
+
+    微前端/低代码平台(widget、远程组件)常见形态: 页面调接口拿到一份资源清单,
+    清单里给的是 `.../assets/bundle/widget/<id>/<ver>/xxx.js` 这种地址。
+    这类脚本不会出现在 HTML 的 <script> 里, 也不一定进无头渲染的 netlog。
+    """
+    if not text:
+        return []
+    head = text.lstrip()[:1]
+    if head not in ("{", "["):
+        return []
+    try:
+        data = json.loads(text)
+    except Exception:  # noqa: BLE001 - 不是合法 JSON 就当没有清单
+        return []
+
+    site_host = urlparse(site_url).netloc.lower()
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if len(found) >= limit:
+            return
+        if isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+            return
+        if isinstance(node, list):
+            for value in node:
+                walk(value)
+            return
+        if not isinstance(node, str):
+            return
+        raw = node.strip()
+        if not raw or len(raw) > 600:
+            return
+        path = raw.split("?", 1)[0].split("#", 1)[0].lower()
+        if not path.endswith(".js"):
+            return
+        full = urljoin(base_url, raw)
+        if urlparse(full).netloc.lower() != site_host:
+            return
+        if full not in seen:
+            seen.add(full)
+            found.append(full)
+
+    walk(data)
+    return found
 
 # 同时跑几个 CPU 密集的检测线程。Python 的正则不释放 GIL, 并行跑再多也不会更快,
 # 反而会把事件循环饿住 —— 实测 8 个站点并行扫描时, 列表接口偶尔要 2~7 秒才返回,

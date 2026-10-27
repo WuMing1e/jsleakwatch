@@ -452,6 +452,81 @@ def _new_target(db, base_url: str) -> dict:
     return {k: row[k] for k in row.keys()}
 
 
+def test_json_manifest_js_urls_are_extracted() -> None:
+    """接口清单里的同源 .js 要能挖出来; 跨域、非 js、坏 JSON 都不要。"""
+    import json
+
+    from app.scanner import _js_urls_from_json
+
+    site = "https://h5.example.com/"
+    base = "https://h5.example.com/api/default/abc"
+    manifest = json.dumps({
+        "widgets": [
+            {"url": "/api/default/abc/assets/bundle/widget/1.2.6/ssoLogin.js"},
+            {"url": "https://cdn.other.com/x.js"},
+            {"url": "/api/data.json"},
+            {"nested": ["./static/js/a.js?v=1", "/static/js/b.js#x"]},
+        ],
+        "note": "不是脚本",
+    })
+    urls = _js_urls_from_json(manifest, base, site)
+    assert "https://h5.example.com/api/default/abc/assets/bundle/widget/1.2.6/ssoLogin.js" in urls
+    assert "https://h5.example.com/api/default/static/js/a.js?v=1" in urls
+    assert "https://h5.example.com/static/js/b.js#x" in urls
+    assert not any("other.com" in u or u.endswith(".json") for u in urls)
+    assert _js_urls_from_json("<html></html>", base, site) == []
+    assert _js_urls_from_json("{bad json", base, site) == []
+
+
+def test_api_manifest_scripts_are_crawled(prepared) -> None:
+    """接口返回的 JSON 清单里引用同源脚本时, 扫描要真的把它抓回来并检测。"""
+    import json
+
+    _target, db = prepared
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path.startswith("/app.js"):
+                body, ctype = b'axios.get("/api/manifest");', "application/javascript"
+            elif self.path.startswith("/api/manifest"):
+                body = json.dumps({"widgets": [{"url": "/widget/sso.js"}]}).encode()
+                ctype = "application/json"
+            elif self.path.startswith("/widget/sso.js"):
+                body = b'const aws = "AKIA3XQ7ZP2LMN4KQ7DA";'
+                ctype = "application/javascript"
+            else:
+                body = b'<html><script src="/app.js"></script></html>'
+                ctype = "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server, url = _serve(Handler)
+    previous = db.get_setting("scan") or {}
+    db.set_setting("scan", {**previous, "scan_api_endpoints": True,
+                            "max_api_endpoints": 20, "headless_render": False})
+    try:
+        target = _new_target(db, url)
+        result = _run(target)
+    finally:
+        server.shutdown()
+        server.server_close()
+        db.set_setting("scan", previous)
+
+    assert result.status == "ok", result.error
+    urls = [r["url"] for r in db.query(
+        "SELECT url FROM assets WHERE target_id=?", (target["id"],))]
+    assert any(u.endswith("/widget/sso.js") for u in urls), f"清单里的脚本应被抓取: {urls}"
+    hits = [r["rule_id"] for r in db.query(
+        "SELECT rule_id FROM findings WHERE target_id=?", (target["id"],))]
+    assert "aws-access-key-id" in hits, hits
+
+
 def test_same_secret_is_upgraded_to_a_more_specific_rule(prepared) -> None:
     """同一把密钥先被通用规则(低等级)命中, 后来被专用规则(高等级)识别时, 要升级而不是并存。"""
     import hashlib
