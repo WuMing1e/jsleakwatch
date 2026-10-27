@@ -1835,8 +1835,9 @@ async function renderSettings() {
             站点并行数要按 <span class="mono">站点数 × 单站耗时 ÷ 巡检周期</span> 估：
             例如 1000 个站点、每站 30 秒、每小时一轮 → 需要约 9 个并行。改完重启生效。
           </div>
-          <div class="form-row">
+          <div class="form-row-3">
             <label class="field">全局并发请求数<input type="number" id="s-conc" min="1" max="32" value="${esc(scan.max_concurrency)}"></label>
+            <label class="field">同域并发请求数<input type="number" id="s-host-conc" min="1" max="8" value="${esc(scan.per_host_concurrency ?? 2)}"></label>
             <label class="field">单站请求间隔 (毫秒)<input type="number" id="s-delay" min="0" max="5000" value="${esc(scan.per_host_delay_ms)}"></label>
           </div>
           <div class="form-row-3">
@@ -1849,7 +1850,7 @@ async function renderSettings() {
             <label class="field">页面递归深度<input type="number" id="s-depth" min="0" max="4" value="${esc(scan.max_depth)}"></label>
           </div>
           <div class="field-hint">
-            重试只作用于「连接没建立起来」和「连接被中途掐断」，站点自己响应慢不重试。
+            连接失败会重试；读取超时会用更长超时补试一次。证书校验失败不会重试。
             单资产大小上限填 <span class="mono">0</span> 表示不限制，整份文件都会下载并扫描。
           </div>
           <label class="field">User-Agent<input type="text" id="s-ua" value="${esc(scan.user_agent)}"></label>
@@ -2227,6 +2228,7 @@ async function saveScanSettings() {
   const payload = {
     scan: {
       max_concurrency: Number($('#s-conc').value),
+      per_host_concurrency: Number($('#s-host-conc').value || 2),
       per_host_delay_ms: Number($('#s-delay').value),
       timeout_seconds: Number($('#s-timeout').value),
       max_retries: Number($('#s-retries').value || 0),

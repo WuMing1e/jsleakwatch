@@ -69,6 +69,7 @@ def scan_config_from_settings(overrides: dict[str, Any] | None = None) -> ScanCo
         timeout_seconds=SETTINGS.scan.timeout_seconds,
         max_retries=SETTINGS.scan.max_retries,
         max_concurrency=SETTINGS.scan.max_concurrency,
+        per_host_concurrency=SETTINGS.scan.per_host_concurrency,
         per_host_delay_ms=SETTINGS.scan.per_host_delay_ms,
         max_assets_per_scan=SETTINGS.scan.max_assets_per_scan,
         max_asset_bytes=SETTINGS.scan.max_asset_bytes,
@@ -267,13 +268,20 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                 # 同一批内也要去重: 外部采集器给出的地址可能与内置入口重叠
                 batch: list[Candidate] = []
                 batch_urls: set[str] = set()
-                for cand in frontier:
-                    if cand.url in visited or cand.url in batch_urls:
-                        continue
-                    batch.append(cand)
-                    batch_urls.add(cand.url)
-                    if len(batch) >= max_assets - fetched:
-                        break
+                deferred: list[Candidate] = []
+                if frontier[0].url == target["base_url"] and fetched == 0:
+                    # 先单独验证入口。入口证书错误/不可达时，再并发 12 个常见配置探针
+                    # 只会重复踩同一个错误，并把一轮扫描拖到几分钟。
+                    batch = [frontier[0]]
+                    deferred = frontier[1:]
+                else:
+                    for cand in frontier:
+                        if cand.url in visited or cand.url in batch_urls:
+                            continue
+                        batch.append(cand)
+                        batch_urls.add(cand.url)
+                        if len(batch) >= max_assets - fetched:
+                            break
                 frontier = []
                 if not batch:
                     break
@@ -292,6 +300,8 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                         optional_miss = optional_kind and resp.status in (401, 403, 404, 410)
                         if failure != "binary" and not optional_miss and len(errors) < 25:
                             errors.append(f"{cand.url}: {failure}")
+                        if cand.url == target["base_url"]:
+                            stop_scan = True
                         continue
                     # 人机校验页不是站点自己的内容: 存下来会变成一堆假资产,
                     # 里面的 WAF 随机串还会被规则当成密钥(误报已经实际发生过)
@@ -397,7 +407,10 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                                 url=child_url, kind="script", depth=cand.depth,
                                 label="接口清单引用的脚本"))
 
-                frontier = [c for url, c in next_batch.items() if url not in visited]
+                frontier = [
+                    c for c in [*deferred, *next_batch.values()]
+                    if c.url not in visited
+                ]
 
             result.bytes_fetched = fetcher.bytes_fetched
 

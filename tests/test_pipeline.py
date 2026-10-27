@@ -324,6 +324,17 @@ def test_transient_connect_timeout_is_retried_once() -> None:
     assert fetcher.requests_made == 1
 
 
+def test_tls_certificate_error_is_not_retried() -> None:
+    """自签证书是永久错误, 重试只会拖慢扫描并放大连接池超时。"""
+    import httpx
+
+    client = _FakeClient(99, httpx.ConnectError(
+        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate"))
+    result, _ = _fetch_with(client, retries=1)
+    assert not result.ok and "CERTIFICATE_VERIFY_FAILED" in result.error
+    assert client.calls == 1
+
+
 def test_read_timeout_gets_one_longer_retry() -> None:
     """读取超时后用更长超时补一次, 避免慢 JS 被误判为缺失。"""
     import httpx
@@ -370,6 +381,50 @@ def test_read_timeout_retry_can_be_turned_off() -> None:
     result, _ = _fetch_with(client, retries=0)
     assert not result.ok
     assert client.calls == 1
+
+
+def test_same_host_requests_respect_concurrency_limit() -> None:
+    import asyncio
+
+    from app.config import ScanConfig
+    from app.fetcher import Fetcher
+
+    class SlowClient(_FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+            self.max_active = 0
+
+        def stream(self, method: str, url: str, **kwargs):
+            outer = self
+
+            class _Ctx:
+                async def __aenter__(inner):
+                    outer.calls += 1
+                    outer.active += 1
+                    outer.max_active = max(outer.max_active, outer.active)
+                    await asyncio.sleep(0.04)
+                    return _FakeStreamResponse(url, outer.body)
+
+                async def __aexit__(inner, *args):
+                    outer.active -= 1
+                    return False
+
+            return _Ctx()
+
+    client = SlowClient()
+
+    async def run():
+        fetcher = Fetcher(ScanConfig(
+            max_concurrency=6, per_host_concurrency=2, per_host_delay_ms=0,
+            max_retries=0,
+        ))
+        fetcher._client = client
+        await asyncio.gather(*(fetcher.get(f"http://same.test/{i}.js") for i in range(8)))
+
+    asyncio.run(run())
+    assert client.calls == 8
+    assert client.max_active == 2
 
 
 # ------------------------------------------------------------ 单资产大小上限
@@ -707,7 +762,10 @@ def test_http_error_on_entry_marks_scan_failed(prepared) -> None:
     _target, db = prepared
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        requests: list[str] = []
+
         def do_GET(self) -> None:
+            self.requests.append(self.path)
             body = b"gateway unavailable"
             self.send_response(503)
             self.send_header("Content-Type", "text/plain")
@@ -728,6 +786,7 @@ def test_http_error_on_entry_marks_scan_failed(prepared) -> None:
 
     assert result.status == "failed"
     assert "HTTP 503" in result.error
+    assert Handler.requests == ["/"], "入口失败后不应继续并发配置探针"
 
 
 def test_identical_content_is_stored_only_once(prepared) -> None:

@@ -37,6 +37,7 @@ class ScanConfig:
     timeout_seconds: float = 15.0
     max_retries: int = 1               # 连接失败重试次数; 读超时会放宽超时补试一次, 0 = 不重试
     max_concurrency: int = 6           # 全局并发请求数
+    per_host_concurrency: int = 2      # 同一域名最多同时请求数, 避免连接池和站点被压垮
     per_host_delay_ms: int = 350       # 同一站点请求间隔, 做基本的礼貌限速
     max_assets_per_scan: int = 400    # 单次扫描最多抓取的 JS 资产数
     max_asset_bytes: int = 0           # 单个资产字节上限, 0 = 不限制(整份下载并扫描)

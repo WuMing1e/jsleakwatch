@@ -486,6 +486,7 @@ JSLW_AI_BASE_URL=http://glm.corp.example.com/v1 JSLW_AI_MODEL=glm-5.2
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
 | `max_concurrency` | 6 | 全局并发请求数 |
+| `per_host_concurrency` | 2 | 同一域名最多同时请求数 |
 | `per_host_delay_ms` | 350 | 同域请求间隔，礼貌限速 |
 | `timeout_seconds` | 15 | 单请求超时 |
 | `max_retries` | 1 | 连接类失败的重试次数；读取超时会额外用更长超时补试一次，`0` = 不重试 |

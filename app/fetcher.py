@@ -89,6 +89,7 @@ class Fetcher:
         self.cfg = cfg
         limit = max_concurrency or cfg.max_concurrency
         self._sem = asyncio.Semaphore(max(1, limit))
+        self._host_sems: dict[str, asyncio.Semaphore] = {}
         self._host_locks: dict[str, asyncio.Lock] = {}
         self._host_last: dict[str, float] = {}
         self._client: httpx.AsyncClient | None = None
@@ -135,6 +136,13 @@ class Fetcher:
             self._host_locks[host] = lock
         return lock
 
+    def _host_sem(self, host: str) -> asyncio.Semaphore:
+        sem = self._host_sems.get(host)
+        if sem is None:
+            sem = asyncio.Semaphore(max(1, int(self.cfg.per_host_concurrency or 1)))
+            self._host_sems[host] = sem
+        return sem
+
     async def _throttle(self, host: str) -> None:
         delay = max(0, self.cfg.per_host_delay_ms) / 1000.0
         if delay <= 0:
@@ -156,16 +164,22 @@ class Fetcher:
         attempt = 0
         while True:
             async with self._sem:
-                await self._throttle(host)
-                try:
-                    resp = await self._request(url, timeout_seconds=request_timeout)
-                except Exception as exc:  # noqa: BLE001 - 单资产失败不应中断整轮扫描
-                    resp, error = None, f"{type(exc).__name__}: {exc}"[:200]
+                async with self._host_sem(host):
+                    await self._throttle(host)
+                    try:
+                        resp = await self._request(url, timeout_seconds=request_timeout)
+                    except Exception as exc:  # noqa: BLE001 - 单资产失败不应中断整轮扫描
+                        resp, error = None, f"{type(exc).__name__}: {exc}"[:200]
             if resp is not None:
                 break
 
             error_kind = error.split(":", 1)[0].strip()
-            if error_kind in RETRYABLE_ERRORS and attempt + 1 < attempts:
+            permanent_tls_error = (
+                error_kind == "ConnectError"
+                and "CERTIFICATE_VERIFY_FAILED" in error.upper()
+            )
+            if (error_kind in RETRYABLE_ERRORS and not permanent_tls_error
+                    and attempt + 1 < attempts):
                 attempt += 1
                 await asyncio.sleep(RETRY_BACKOFF_S * (attempt + 1))
                 continue
