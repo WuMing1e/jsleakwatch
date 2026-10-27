@@ -71,6 +71,9 @@ def test_collect_runtime_seeds_picks_dom_and_get_requests(monkeypatch) -> None:
         ("POST", "http://t/api/save"),                         # 写请求, 不收
         ("GET", "https://cdn.other.com/x.json"),               # 跨域, 不收
         ("GET", "http://t/js/app.js"),                         # 与 DOM 重复, 只留一条
+        ("GET", "http://t/css/app.css"),                       # 不承载 JS, 不收
+        ("GET", "http://t/fonts/app.woff2"),                   # 字体, 不收
+        ("GET", "http://t/assets/intro.mp4"),                  # 视频, 不收
     ]))
     target = {"id": 1, "base_url": "http://t/"}
     extractor = Extractor(base_url="http://t/", scope="same-origin")
@@ -81,6 +84,7 @@ def test_collect_runtime_seeds_picks_dom_and_get_requests(monkeypatch) -> None:
     assert urls.get("http://t/api/runtime-config.json") == "api"
     assert urls.get("http://t/js/lazy-9f2c1d.js") == "script"
     assert "http://t/api/save" not in urls and "https://cdn.other.com/x.json" not in urls
+    assert not any(url.endswith((".css", ".woff2", ".mp4")) for url in urls)
     assert sum(1 for c in seeds if c.url == "http://t/js/app.js") == 1
 
 

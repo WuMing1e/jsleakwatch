@@ -284,8 +284,9 @@ class _FakeClient:
         self.declared = declared
         self.calls = 0
 
-    def stream(self, method: str, url: str):
+    def stream(self, method: str, url: str, **kwargs):
         self.calls += 1
+        self.last_timeout = kwargs.get("timeout")
         fail = self.exc is not None and self.calls <= self.failures
         exc = self.exc
         resp = _FakeStreamResponse(url, self.body, self.declared)
@@ -323,14 +324,25 @@ def test_transient_connect_timeout_is_retried_once() -> None:
     assert fetcher.requests_made == 1
 
 
-def test_read_timeout_is_not_retried() -> None:
-    """站点自己响应慢就别重试了, 否则整轮扫描更久。"""
+def test_read_timeout_gets_one_longer_retry() -> None:
+    """读取超时后用更长超时补一次, 避免慢 JS 被误判为缺失。"""
     import httpx
 
     client = _FakeClient(99, httpx.ReadTimeout("响应超时"))
     result, _ = _fetch_with(client, retries=1)
     assert not result.ok and result.error.startswith("ReadTimeout")
-    assert client.calls == 1
+    assert client.calls == 2
+    assert client.last_timeout == 30.0
+
+
+def test_read_timeout_retry_recovers_slow_asset() -> None:
+    import httpx
+
+    client = _FakeClient(1, httpx.ReadTimeout("响应超时"))
+    result, _ = _fetch_with(client, retries=1)
+    assert result.ok and result.text == "var a = 1;"
+    assert client.calls == 2
+    assert client.last_timeout == 30.0
 
 
 def test_retry_gives_up_and_reports_last_error() -> None:
@@ -346,6 +358,15 @@ def test_retries_can_be_turned_off() -> None:
     import httpx
 
     client = _FakeClient(99, httpx.ConnectTimeout("连接超时"))
+    result, _ = _fetch_with(client, retries=0)
+    assert not result.ok
+    assert client.calls == 1
+
+
+def test_read_timeout_retry_can_be_turned_off() -> None:
+    import httpx
+
+    client = _FakeClient(99, httpx.ReadTimeout("响应超时"))
     result, _ = _fetch_with(client, retries=0)
     assert not result.ok
     assert client.calls == 1

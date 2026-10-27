@@ -488,7 +488,7 @@ JSLW_AI_BASE_URL=http://glm.corp.example.com/v1 JSLW_AI_MODEL=glm-5.2
 | `max_concurrency` | 6 | 全局并发请求数 |
 | `per_host_delay_ms` | 350 | 同域请求间隔，礼貌限速 |
 | `timeout_seconds` | 15 | 单请求超时 |
-| `max_retries` | 1 | 连接类失败（连接超时 / 被中途掐断）的重试次数，`0` = 不重试 |
+| `max_retries` | 1 | 连接类失败的重试次数；读取超时会额外用更长超时补试一次，`0` = 不重试 |
 | `max_assets_per_scan` | 400 | 单站单轮资产上限 |
 | `max_asset_bytes` | 0（不限） | 单资产字节上限，`0` = 整份下载并扫描 |
 | `max_depth` | 2 | HTML 页面递归深度（≤4） |

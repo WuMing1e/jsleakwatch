@@ -12,9 +12,11 @@ import httpx
 from .config import ScanConfig
 
 
-# 只有"连接根本没建立起来"这一类才值得重试; 响应超时是站点自己慢, 重试只会拖长扫描。
+# 连接类错误按配置次数重试; 读超时通常是单个文件较大或站点瞬时变慢,
+# 只额外重试一次, 并放宽超时, 避免把可达的大 JS 直接漏掉。
 RETRYABLE_ERRORS = frozenset({"ConnectTimeout", "ConnectError", "PoolTimeout", "RemoteProtocolError"})
 RETRY_BACKOFF_S = 0.6
+READ_TIMEOUT_RETRY_EXTRA_S = 15.0
 
 
 @dataclass
@@ -149,21 +151,36 @@ class Fetcher:
         host = urlparse(url).netloc.lower()
         attempts = max(1, int(self.cfg.max_retries) + 1)
         resp, error = None, ""
-        for attempt in range(attempts):
+        request_timeout: float | None = None
+        read_timeout_retried = False
+        attempt = 0
+        while True:
             async with self._sem:
                 await self._throttle(host)
                 try:
-                    resp = await self._request(url)
+                    resp = await self._request(url, timeout_seconds=request_timeout)
                 except Exception as exc:  # noqa: BLE001 - 单资产失败不应中断整轮扫描
                     resp, error = None, f"{type(exc).__name__}: {exc}"[:200]
             if resp is not None:
                 break
-            # 连接根本没建立起来多半是网络抖动, 歇一下再试一次往往就过了;
-            # 响应超时(ReadTimeout)不重试 —— 那是站点自己慢, 再来一轮只会让扫描更久。
-            if error.split(":", 1)[0].strip() not in RETRYABLE_ERRORS:
-                break
-            if attempt + 1 < attempts:
+
+            error_kind = error.split(":", 1)[0].strip()
+            if error_kind in RETRYABLE_ERRORS and attempt + 1 < attempts:
+                attempt += 1
                 await asyncio.sleep(RETRY_BACKOFF_S * (attempt + 1))
+                continue
+            # 大 JS / 配置文件的读取超时往往是一次性的。这里不再用同一个 15 秒超时
+            # 硬重试, 而是放宽至少 15 秒后再试一次, 同时仍受 max_retries 总开关约束。
+            if (error_kind == "ReadTimeout" and attempts > 1
+                    and not read_timeout_retried):
+                read_timeout_retried = True
+                request_timeout = max(
+                    float(self.cfg.timeout_seconds) * 2,
+                    float(self.cfg.timeout_seconds) + READ_TIMEOUT_RETRY_EXTRA_S,
+                )
+                await asyncio.sleep(RETRY_BACKOFF_S)
+                continue
+            break
         if resp is None:
             return FetchResult(url, url, 0, "", "", 0, error=error)
         self.requests_made += 1
@@ -189,14 +206,15 @@ class Fetcher:
             challenge=challenge,
         )
 
-    async def _request(self, url: str) -> _RawBody:
+    async def _request(self, url: str, timeout_seconds: float | None = None) -> _RawBody:
         """流式读取响应。
 
         `max_asset_bytes` 为 0 时整份读完(不截断); 设了上限就读到上限为止再断开,
         不去把几十兆先拉下来再扔掉。
         """
         limit = max(0, int(self.cfg.max_asset_bytes or 0))
-        async with self._client.stream("GET", url) as resp:
+        kwargs = {"timeout": timeout_seconds} if timeout_seconds is not None else {}
+        async with self._client.stream("GET", url, **kwargs) as resp:
             encoding = resp.encoding or "utf-8"
             ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
             chunks: list[bytes] = []

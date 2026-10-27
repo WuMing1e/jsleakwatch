@@ -8,7 +8,7 @@ from __future__ import annotations
 import posixpath
 import re
 from dataclasses import dataclass, field
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 # HTML 中的脚本引用
 HTML_SCRIPT_RE = re.compile(
@@ -125,15 +125,45 @@ class Extractor:
             return
         out[key] = Candidate(url=url, kind=kind, depth=depth, label=label)
 
+    @staticmethod
+    def _resolve_code_reference(asset_url: str, ref: str) -> str:
+        """解析 JS 引用，去掉当前目录与引用路径的重复前缀。"""
+        ref = ref.strip()
+        parsed_ref = urlsplit(ref)
+        if (not ref or ref.startswith(("/", "./", "../"))
+                or parsed_ref.scheme or parsed_ref.netloc):
+            return urljoin(asset_url, ref)
+
+        base = urlsplit(asset_url)
+        base_dir = posixpath.dirname(base.path)
+        base_parts = [part for part in base_dir.split("/") if part]
+        ref_parts = [part for part in parsed_ref.path.split("/") if part]
+        if not base_parts or not ref_parts:
+            return urljoin(asset_url, ref)
+
+        overlap = 0
+        for size in range(min(len(base_parts), len(ref_parts)), 0, -1):
+            if base_parts[-size:] == ref_parts[:size]:
+                overlap = size
+                break
+        if not overlap:
+            return urljoin(asset_url, ref)
+
+        merged = "/" + "/".join(base_parts[:-overlap] + ref_parts)
+        return urlunsplit((base.scheme, base.netloc, merged,
+                           parsed_ref.query, parsed_ref.fragment))
+
     # ---------------------------------------------------------- HTML
     def from_html(self, page_url: str, html: str, depth: int) -> list[Candidate]:
         out: dict[str, Candidate] = {}
         for src in HTML_SCRIPT_RE.findall(html):
-            self._add(out, urljoin(page_url, src.strip()), "script", depth)
+            self._add(out, self._resolve_code_reference(page_url, src),
+                      "script", depth)
         for block in HTML_MODULEPRELOAD_RE.findall(html):
             for href in HTML_HREF_RE.findall(block):
                 if href.lower().endswith(SCRIPT_EXT):
-                    self._add(out, urljoin(page_url, href.strip()), "script", depth)
+                    self._add(out, self._resolve_code_reference(page_url, href),
+                              "script", depth)
         for idx, body in enumerate(HTML_INLINE_SCRIPT_RE.findall(html)):
             if len(body.strip()) < 40:
                 continue
@@ -142,7 +172,8 @@ class Extractor:
                 inline=body, label=f"inline script #{idx + 1}")
             # 内联脚本里也可能声明外部 chunk
             for ref in JS_QUOTED_PATH_RE.findall(body):
-                self._add(out, urljoin(page_url, ref), "script", depth)
+                self._add(out, self._resolve_code_reference(page_url, ref),
+                          "script", depth)
         # 内联 JSON 配置 (window.__CONFIG__ = {...}) 通常就在 script 标签里, 上面已覆盖
         self.stats["html_scripts"] = self.stats.get("html_scripts", 0) + len(out)
         return list(out.values())
@@ -167,12 +198,13 @@ class Extractor:
             # 语言包/模块名（如 moment 的 "./af.js"）不是构建产物, 抓它只会得到 404
             if MODULE_SPECIFIER_RE.match(ref) and not re.search(r"[0-9a-f]{6,}", ref, re.I):
                 continue
-            self._add(out, urljoin(asset_url, ref), "script", depth)
+            self._add(out, self._resolve_code_reference(asset_url, ref), "script", depth)
         for ref in JS_DYNAMIC_IMPORT_RE.findall(text):
             if ref.lower().endswith(SCRIPT_EXT) or not posixpath.splitext(ref)[1]:
-                self._add(out, urljoin(asset_url, ref), "script", depth)
+                self._add(out, self._resolve_code_reference(asset_url, ref),
+                          "script", depth)
         for ref in JS_IMPORT_SCRIPTS_RE.findall(text):
-            self._add(out, urljoin(asset_url, ref), "script", depth)
+            self._add(out, self._resolve_code_reference(asset_url, ref), "script", depth)
 
         # webpack / Vue CLI 的 chunk 映射: 用前缀 + 映射表拼出实际文件
         prefixes = JS_STATIC_PREFIX_RE.findall(text)
@@ -209,7 +241,8 @@ class Extractor:
                         name, hashed = names[key], hashes[key]
                         if not self._plausible_chunk_part(name):
                             continue
-                        self._add(out, urljoin(asset_url, f"{best}{name}.{hashed}.js"),
+                        self._add(out, self._resolve_code_reference(
+                                      asset_url, f"{best}{name}.{hashed}.js"),
                                   "script", depth, "chunk-map")
                         synth_budget -= 1
                     self.stats["synth_chunks"] = self.stats.get("synth_chunks", 0) + 1
@@ -223,7 +256,9 @@ class Extractor:
             # 至少出现一个哈希式文件名, 才认为这是 webpack 的 chunk 映射表
             if names and hashed:
                 for name in dict.fromkeys(names[: self.max_synth_chunks]):
-                    self._add(out, urljoin(asset_url, best + name + ".js"), "script", depth, "chunk-map")
+                    self._add(out, self._resolve_code_reference(
+                                  asset_url, best + name + ".js"),
+                              "script", depth, "chunk-map")
                 self.stats["synth_chunks"] = self.stats.get("synth_chunks", 0) + min(
                     len(names), self.max_synth_chunks)
 
@@ -231,7 +266,8 @@ class Extractor:
             for ref in JS_SOURCEMAP_RE.findall(text):
                 if ref.startswith("data:"):
                     continue
-                self._add(out, urljoin(asset_url, ref.strip()), "map", depth)
+                self._add(out, self._resolve_code_reference(asset_url, ref),
+                          "map", depth)
         if self.scan_api:
             self._add_api(out, asset_url, text, depth)
         return list(out.values())

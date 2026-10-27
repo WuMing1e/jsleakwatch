@@ -20,7 +20,7 @@ from . import ai, asset_history, db, gating
 from .config import SETTINGS, ScanConfig
 from .discover import Extractor, Candidate, config_probe_candidates
 from .fetcher import Fetcher
-from .analyzers import kind_from_url
+from .analyzers import is_static_asset, kind_from_url
 from .rules import (
     CONCAT_RE,
     Detection,
@@ -158,7 +158,8 @@ async def collect_runtime_seeds(
                 seen.add(cand.url)
                 seeds.append(cand)
         for method, url in result.requests:
-            if method != "GET" or not same_origin(url, base) or url.split("#")[0] in seen:
+            if (method != "GET" or not same_origin(url, base)
+                    or is_static_asset(url) or url.split("#")[0] in seen):
                 continue
             if url.split("#")[0] == base:
                 continue

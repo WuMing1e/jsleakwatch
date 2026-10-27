@@ -169,7 +169,7 @@ class KatanaDiscovery:
                 continue
             if not _in_scope(endpoint, base_url, scope):
                 continue
-            if _is_static_asset(endpoint):
+            if is_static_asset(endpoint):
                 continue
             key = endpoint.split("#")[0]
             if key in out:
@@ -199,7 +199,8 @@ SKIP_ASSET_EXT = re.compile(
     r"pdf|zip|gz|tgz|rar|7z|exe|dmg|apk|iso|bin)(?:$|\?)", re.I)
 
 
-def _is_static_asset(url: str) -> bool:
+def is_static_asset(url: str) -> bool:
+    """返回 True 表示该 URL 不承载可扫描的 JS/配置内容。"""
     return bool(SKIP_ASSET_EXT.search(urlparse(url).path + "?" + (urlparse(url).query or "")))
 
 

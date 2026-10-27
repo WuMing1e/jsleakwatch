@@ -102,6 +102,29 @@ def test_css_hash_map_is_not_used_for_js_chunks() -> None:
     assert not any("11111111" in u for u in urls), "不应把 CSS 哈希表拼成 .js"
 
 
+def test_relative_chunk_path_does_not_duplicate_static_prefix() -> None:
+    """Vite 依赖表里的 static/js 路径不能与当前 /static/js 目录重复拼接。"""
+    js = """
+      const deps = ["static/js/index-AbCd1234.js", "static/js/vendor-EfGh5678.js"];
+      import("./locale.js");
+      const nested = "chunks/panel-IjKl9012.js";
+    """
+    urls = {c.url for c in extractor().from_js(
+        "https://shop.example.com/static/js/index-Main1234.js", js, 1)}
+    assert "https://shop.example.com/static/js/index-AbCd1234.js" in urls
+    assert "https://shop.example.com/static/js/vendor-EfGh5678.js" in urls
+    assert "https://shop.example.com/static/js/locale.js" in urls
+    assert "https://shop.example.com/static/js/chunks/panel-IjKl9012.js" in urls
+    assert not any("/static/js/static/js/" in url for url in urls)
+
+
+def test_relative_chunk_path_preserves_app_mount_prefix() -> None:
+    urls = {c.url for c in extractor().from_js(
+        "https://shop.example.com/app/static/js/index-Main1234.js",
+        'const deps = ["static/js/lazy-AbCd1234.js"];', 1)}
+    assert urls == {"https://shop.example.com/app/static/js/lazy-AbCd1234.js"}
+
+
 def test_pages_from_html_same_origin_only() -> None:
     html = '<a href="/about">a</a><a href="https://other.com/x">b</a><a href="/logo.png">c</a>'
     pages = {c.url for c in extractor().pages_from_html(BASE, html, 1)}
