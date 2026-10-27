@@ -981,15 +981,19 @@ function findingsQuery() {
 
 async function renderFindings() {
   const q = parseHash().query;
-  if (q.target && state.filters.target !== q.target) {
+  // URL 里的筛选只在"进入这个地址"时应用一次; 否则用户改完筛选再渲染, 又会被 URL
+  // 里的旧参数覆盖回去(表现为"输入搜索后回车没反应")。
+  const fresh = state.appliedHash !== location.hash;
+  if (fresh) state.appliedHash = location.hash;
+  if (fresh && q.target && state.filters.target !== q.target) {
     state.filters.target = q.target;
     state.filters.target_q = '';
     state.filters.page = 0;
     state.pendingTargetName = true;      // 拿到站点列表后回填搜索框
   }
-  if (q.rule && state.filters.rule !== q.rule) { state.filters.rule = q.rule; state.filters.page = 0; }
-  if (q.severity) { state.filters.severity = new Set(q.severity.split(',')); }
-  if (q.status !== undefined && q.status !== null && state.hash !== location.hash) state.filters.status = q.status;
+  if (fresh && q.rule && state.filters.rule !== q.rule) { state.filters.rule = q.rule; state.filters.page = 0; }
+  if (fresh && q.severity) { state.filters.severity = new Set(q.severity.split(',')); }
+  if (fresh && q.status !== undefined && q.status !== null) state.filters.status = q.status;
 
   const [data, targetData, rules] = await Promise.all([
     api('/api/findings?' + findingsQuery().toString()),
@@ -1106,6 +1110,14 @@ async function renderFindings() {
   qInput.oninput = () => {
     clearTimeout(timer);
     timer = setTimeout(() => { state.filters.q = qInput.value.trim(); state.filters.page = 0; refresh(); }, 320);
+  };
+  qInput.onkeydown = (event) => {
+    if (event.key === 'Enter') {
+      clearTimeout(timer);
+      state.filters.q = qInput.value.trim();
+      state.filters.page = 0;
+      refresh();
+    }
   };
 
   // 站点筛选改成搜索框: 输入即过滤(防抖 320ms), 重绘后把焦点还回来
