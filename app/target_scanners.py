@@ -17,8 +17,11 @@ JSHawk / JScanner2 / Katana 这类工具属于后者：输入是域名，自己�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import re
+import signal
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -28,6 +31,17 @@ from urllib.parse import urlparse
 
 from . import db
 from .analyzers import RawHit, normalize_severity
+
+
+async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """杀掉独立进程组，避免工具脚本的子进程在超时后逃逸成孤儿。"""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, AttributeError):
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+    with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError):
+        await asyncio.wait_for(proc.wait(), timeout=2)
 
 
 @dataclass
@@ -174,10 +188,11 @@ class JScanner2Scanner:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd, cwd=str(self.root()),
                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
                 )
                 _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
             except asyncio.TimeoutError:
-                proc.kill()
+                await _kill_process_tree(proc)
                 return ScanRunResult(error=f"执行超时 (>{self.timeout}s)",
                                      runtime_ms=int((time.monotonic() - started) * 1000))
             except OSError as exc:
@@ -315,10 +330,11 @@ class JSHawkScanner:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd, cwd=str(self.root()),
                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
                 )
                 _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
             except asyncio.TimeoutError:
-                proc.kill()
+                await _kill_process_tree(proc)
                 return ScanRunResult(error=f"执行超时 (>{self.timeout}s)",
                                      runtime_ms=int((time.monotonic() - started) * 1000))
             except OSError as exc:

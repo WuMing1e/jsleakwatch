@@ -485,6 +485,24 @@ def test_jshawk_command_and_availability(tmp_path: Path) -> None:
     assert str(scanner.results_root()).endswith("work/jshawk")
 
 
+def test_external_scanner_timeout_kills_whole_process_group(monkeypatch) -> None:
+    """JSHawk 的 curl 子进程可能继承父 shell, 超时后必须整组清理。"""
+    from app import target_scanners
+
+    killed: list[int] = []
+
+    class FakeProc:
+        pid = 43210
+
+        async def wait(self):
+            return 0
+
+    monkeypatch.setattr(target_scanners.os, "killpg",
+                        lambda pid, sig: killed.append(pid))
+    asyncio.run(target_scanners._kill_process_tree(FakeProc()))
+    assert killed == [43210]
+
+
 MINI_HITS = [
     # 与内置引擎重叠 -> 应合并为同一条, 只追加来源
     {"rule": "aws-key", "severity": "critical", "secret": "AKIAJKQ7XH3MZ6BND4PA",
