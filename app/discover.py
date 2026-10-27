@@ -64,6 +64,7 @@ STATIC_CONTAINER_SEGMENTS = frozenset({
     "static", "assets", "_next", "chunks", "dist", "build", "js", "scripts", "bundle",
 })
 INVALID_JS_REF_CHARS = frozenset("{}[]!\\<>")
+TEMPLATE_REF_TOKENS = ("${", "{{", "}}", "#{")
 NON_PAGE_EXT = re.compile(
     r"\.(js|mjs|cjs|css|json|xml|txt|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|mp4|webm|pdf|zip|gz)$", re.I)
 
@@ -103,6 +104,8 @@ def _plausible_js_asset_reference(ref: str) -> bool:
     """过滤打包源码里的 node_modules / loader 模板等非线上资产路径。"""
     path = urlparse(ref).path
     if not path.lower().endswith(SCRIPT_EXT):
+        return False
+    if any(token in ref for token in TEMPLATE_REF_TOKENS):
         return False
     if any(ch in INVALID_JS_REF_CHARS or ord(ch) < 32 for ch in path):
         return False
@@ -226,10 +229,14 @@ class Extractor:
                 continue
             self._add(out, self._resolve_code_reference(asset_url, ref), "script", depth)
         for ref in JS_DYNAMIC_IMPORT_RE.findall(text):
+            if any(token in ref for token in TEMPLATE_REF_TOKENS):
+                continue
             if ref.lower().endswith(SCRIPT_EXT) or not posixpath.splitext(ref)[1]:
                 self._add(out, self._resolve_code_reference(asset_url, ref),
                           "script", depth)
         for ref in JS_IMPORT_SCRIPTS_RE.findall(text):
+            if any(token in ref for token in TEMPLATE_REF_TOKENS):
+                continue
             self._add(out, self._resolve_code_reference(asset_url, ref), "script", depth)
 
         # webpack / Vue CLI 的 chunk 映射: 用前缀 + 映射表拼出实际文件

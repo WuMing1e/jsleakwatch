@@ -107,6 +107,19 @@ def test_bundler_source_paths_are_not_treated_as_assets() -> None:
     assert not any("node_modules" in url or "vue-loader" in url for url in urls)
 
 
+def test_js_template_paths_are_not_treated_as_assets() -> None:
+    """带运行时变量的 import 路径不能猜成具体 URL。"""
+    js = """
+      import(`./assets/${name}.js`);
+      import(`./panels/${panel}/index.js`);
+      importScripts("/workers/${version}/worker.js");
+      const real = "assets/index-AbCd1234.js";
+    """
+    urls = {c.url for c in extractor().from_js(
+        "https://shop.example.com/assets/main-Main1234.js", js, 1)}
+    assert urls == {"https://shop.example.com/assets/index-AbCd1234.js"}
+
+
 def test_css_hash_map_is_not_used_for_js_chunks() -> None:
     """回归（真实站点发现）: 同一份产物里有一张拼 .js 的表，还有一张拼 .css 的同名表。
     用后者合成 .js 必然 404 —— 实测在一个站点上白发了 13 个请求。"""
