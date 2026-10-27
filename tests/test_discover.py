@@ -91,6 +91,22 @@ def test_library_module_specifiers_are_not_treated_as_chunks() -> None:
     assert any("chunk.9f8e7d6c.js" in u for u in urls)
 
 
+def test_bundler_source_paths_are_not_treated_as_assets() -> None:
+    """回归（真实站点）: node_modules 与 webpack loader 模板不能变成线上 URL。"""
+    js = """
+      require("node_modules/core-js/internals/ieee754.js");
+      require("node-forge/lib/ed25519.js");
+      const bad = "}!./node_modules/vue-loader/lib/loaders/templateLoader.js";
+      const real = "static/js/chunk-AbCd1234.js";
+      const locale = "locale.js";
+    """
+    urls = {c.url for c in extractor().from_js(
+        "https://shop.example.com/static/js/index-Main1234.js", js, 1)}
+    assert "https://shop.example.com/static/js/chunk-AbCd1234.js" in urls
+    assert "https://shop.example.com/static/js/locale.js" in urls
+    assert not any("node_modules" in url or "vue-loader" in url for url in urls)
+
+
 def test_css_hash_map_is_not_used_for_js_chunks() -> None:
     """回归（真实站点发现）: 同一份产物里有一张拼 .js 的表，还有一张拼 .css 的同名表。
     用后者合成 .js 必然 404 —— 实测在一个站点上白发了 13 个请求。"""

@@ -60,6 +60,10 @@ API_URL_FIELD_RE = re.compile(
 
 SCRIPT_EXT = (".js", ".mjs", ".cjs")
 STATIC_HINT = re.compile(r"(static|assets|_next|chunks|dist|build|js|bundle)", re.I)
+STATIC_CONTAINER_SEGMENTS = frozenset({
+    "static", "assets", "_next", "chunks", "dist", "build", "js", "scripts", "bundle",
+})
+INVALID_JS_REF_CHARS = frozenset("{}[]!\\<>")
 NON_PAGE_EXT = re.compile(
     r"\.(js|mjs|cjs|css|json|xml|txt|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|mp4|webm|pdf|zip|gz)$", re.I)
 
@@ -93,6 +97,26 @@ def _norm(url: str) -> str:
     parts = urlparse(url)
     path = parts.path or "/"
     return f"{parts.scheme}://{parts.netloc.lower()}{path}"
+
+
+def _plausible_js_asset_reference(ref: str) -> bool:
+    """过滤打包源码里的 node_modules / loader 模板等非线上资产路径。"""
+    path = urlparse(ref).path
+    if not path.lower().endswith(SCRIPT_EXT):
+        return False
+    if any(ch in INVALID_JS_REF_CHARS or ord(ch) < 32 for ch in path):
+        return False
+    parts = [part for part in path.split("/") if part and part != "."]
+    if any(part == "node_modules" for part in parts):
+        return False
+    if path.startswith(("/", "./", "../")):
+        return True
+    if len(parts) <= 1:
+        return True
+    directories = parts[:-1]
+    if any(part.lower() in STATIC_CONTAINER_SEGMENTS for part in directories):
+        return True
+    return bool(CHUNK_HASH_RE.search(parts[-1]))
 
 
 @dataclass
@@ -197,6 +221,8 @@ class Extractor:
         for ref in JS_QUOTED_PATH_RE.findall(text):
             # 语言包/模块名（如 moment 的 "./af.js"）不是构建产物, 抓它只会得到 404
             if MODULE_SPECIFIER_RE.match(ref) and not re.search(r"[0-9a-f]{6,}", ref, re.I):
+                continue
+            if not _plausible_js_asset_reference(ref):
                 continue
             self._add(out, self._resolve_code_reference(asset_url, ref), "script", depth)
         for ref in JS_DYNAMIC_IMPORT_RE.findall(text):
