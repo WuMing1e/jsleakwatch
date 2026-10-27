@@ -8,17 +8,68 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
+
 from . import db
+from .config import DATA_DIR
 from .notify import FeishuNotifier
 from .scanner import ScanResult, scan_target
 
 MAX_PARALLEL_TARGETS = 3          # 默认值, 可在设置里覆盖
 TICK_SECONDS = 5
 BACKLOG_FACTOR = 3                # 队列里最多堆积 并行度 × 该倍数
+INSTANCE_LOCK_PATH = DATA_DIR / "jslw.scheduler.lock"
+
+
+def acquire_instance_lock(path: Path = INSTANCE_LOCK_PATH):
+    """保证同一数据目录只有一个调度器，避免重启残留进程重复扫描。"""
+    handle = path.open("a+", encoding="utf-8")
+    if fcntl is None:
+        return handle
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        raise RuntimeError("检测到另一个 JSLeakWatch 调度器仍在运行") from exc
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
+def release_instance_lock(handle) -> None:
+    if handle is None:
+        return
+    if fcntl is not None:
+        with contextlib.suppress(OSError):
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    handle.close()
+
+
+def close_orphaned_scans() -> int:
+    """启动时关闭上次异常退出留下的 running 记录。调用前必须已持有实例锁。"""
+    rows = db.query("SELECT id FROM scans WHERE status='running'")
+    if not rows:
+        return 0
+    now = db.utcnow()
+    db.execute(
+        "UPDATE scans SET status='failed', finished_at=?, "
+        "error=CASE WHEN error='' THEN ? ELSE error || '; ' || ? END "
+        "WHERE status='running'",
+        (now, "扫描因服务重启/异常退出而中断", "扫描因服务重启/异常退出而中断"),
+    )
+    db.log_event(f"清理 {len(rows)} 条中断扫描", kind="scheduler", level="warn")
+    return len(rows)
 
 
 def scheduler_config() -> dict[str, int]:
@@ -51,6 +102,7 @@ class Scheduler:
         self._workers: list[asyncio.Task[None]] = []
         self._stop = asyncio.Event()
         self._notifier_instance: FeishuNotifier | None = None
+        self._instance_lock = None
 
     @property
     def notifier(self) -> FeishuNotifier:
@@ -66,6 +118,8 @@ class Scheduler:
     async def start(self) -> None:
         if self._task is not None:
             return
+        self._instance_lock = acquire_instance_lock()
+        close_orphaned_scans()
         cfg = scheduler_config()
         parallel = cfg["max_parallel_targets"]
         self.tick_seconds = cfg["tick_seconds"]
@@ -88,6 +142,8 @@ class Scheduler:
                     await task
         self._workers = []
         self._task = None
+        release_instance_lock(self._instance_lock)
+        self._instance_lock = None
 
     async def _loop(self) -> None:
         while not self._stop.is_set():

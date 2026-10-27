@@ -13,6 +13,7 @@ def main() -> None:
         port=SETTINGS.port,
         log_level="info",
         reload=False,
+        timeout_graceful_shutdown=10,
     )
 
 

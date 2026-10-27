@@ -186,6 +186,35 @@ def test_cancel_target_drops_queued_scan() -> None:
     assert sched.cancel_target(999999) is False        # 不存在的站点不报错
 
 
+def test_scheduler_instance_lock_and_orphan_cleanup(client) -> None:
+    """重启残留进程不能并存；上次留下的 running 扫描要自动收口。"""
+    import tempfile
+
+    from app import db
+    from app.scheduler import acquire_instance_lock, close_orphaned_scans, release_instance_lock
+
+    lock_path = Path(tempfile.mkdtemp(prefix="jslw-lock-")) / "scheduler.lock"
+    first = acquire_instance_lock(lock_path)
+    try:
+        with pytest.raises(RuntimeError, match="另一个 JSLeakWatch"):
+            acquire_instance_lock(lock_path)
+    finally:
+        release_instance_lock(first)
+
+    target = client.post("/api/targets", json={
+        "name": "中断站", "base_url": "http://orphan.test",
+    }).json()
+    scan_id = db.execute(
+        "INSERT INTO scans(target_id,started_at,status) VALUES(?,?,'running')",
+        (target["id"], db.utcnow()),
+    ).lastrowid
+    assert close_orphaned_scans() >= 1
+    row = db.query_one("SELECT status,error,finished_at FROM scans WHERE id=?", (scan_id,))
+    assert row["status"] == "failed"
+    assert "重启" in row["error"] and row["finished_at"]
+    client.delete(f"/api/targets/{target['id']}")
+
+
 def test_findings_reuse_across_sites(client) -> None:
     """同一命中值出现在多个站点时, 列表要标出复用站点数, 详情要能互相跳。"""
     from app import db
