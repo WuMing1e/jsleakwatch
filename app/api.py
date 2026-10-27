@@ -689,6 +689,7 @@ def list_findings(
     status: str = "",
     severity: str = "",
     target_id: int | None = None,
+    target_q: str = "",
     rule_id: str = "",
     category: str = "",
     ai_verdict: str = "",
@@ -714,6 +715,12 @@ def list_findings(
     if target_id:
         where.append("f.target_id = ?")
         params.append(target_id)
+    if target_q:
+        # 站点用搜索而不是下拉: 上千个站点时下拉根本翻不动。
+        # 子查询让 COUNT 与明细两条 SQL 都能复用同一段条件。
+        like = f"%{target_q.strip()}%"
+        where.append("f.target_id IN (SELECT id FROM targets WHERE name LIKE ? OR base_url LIKE ?)")
+        params.extend([like, like])
     if rule_id:
         where.append("f.rule_id = ?")
         params.append(rule_id)

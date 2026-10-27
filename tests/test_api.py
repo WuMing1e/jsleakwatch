@@ -353,6 +353,44 @@ def test_settings_exposes_analyzer_config_and_size_limits(client) -> None:
     client.put("/api/settings", json={"scan": {"max_asset_bytes": 0}})
 
 
+def test_findings_target_search_matches_name_or_url(client) -> None:
+    """泄漏发现的站点筛选是搜索框: 按名称/URL 模糊过滤, 而不是精确 id。"""
+    from app import db
+
+    created = []
+    try:
+        for name, host in (("alpha-search.test", "alpha-search.test"),
+                           ("beta-search.test", "beta-search.test")):
+            tid = int(db.execute(
+                "INSERT INTO targets(name, base_url, created_at) VALUES(?,?,?)",
+                (name, f"http://{host}/", db.utcnow())).lastrowid or 0)
+            db.execute(
+                "INSERT INTO findings(target_id, rule_id, rule_name, severity, category, fingerprint, "
+                "match_masked, match_sha256, context, line_no, entropy, asset_url, first_seen_at, "
+                "last_seen_at, times_seen, status, verified) "
+                "VALUES(?,?,?,?,?,?,?,?,?,1,4.0,?,?,?,1,'new','unverified')",
+                (tid, "aws-access-key-id", "AWS Access Key", "high", "cloud",
+                 f"fp-search-{host}", "AKIA...D4PA(len=20)", f"sha-search-{host}",
+                 "ctx", f"http://{host}/a.js", db.utcnow(), db.utcnow()))
+            created.append(tid)
+
+        items = client.get("/api/findings", params={
+            "target_q": "alpha-search", "status": "new", "include_gated": "1",
+        }).json()["items"]
+        names = {i["target_name"] for i in items}
+        assert names == {"alpha-search.test"}, names
+
+        # 按 URL 片段也能搜到
+        items = client.get("/api/findings", params={
+            "target_q": "beta-search.test", "status": "new", "include_gated": "1",
+        }).json()["items"]
+        assert {i["target_name"] for i in items} == {"beta-search.test"}
+    finally:
+        for tid in created:
+            db.execute("DELETE FROM findings WHERE target_id=?", (tid,))
+            db.execute("DELETE FROM targets WHERE id=?", (tid,))
+
+
 def test_raw_value_is_only_returned_when_reveal_is_on(client) -> None:
     """明文命中值默认不外发; 打开"界面明文显示"后才出现在接口里。"""
     from app import db

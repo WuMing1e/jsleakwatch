@@ -266,7 +266,7 @@ const state = {
   hash: '',
   overview: null,
   live: null,
-  filters: { severity: new Set(), status: 'new,open', target: '', rule: '', q: '', sort: 'recent', page: 0, ai: '', showGated: false },
+  filters: { severity: new Set(), status: 'new,open', target: '', target_q: '', rule: '', q: '', sort: 'recent', page: 0, ai: '', showGated: false },
   selected: new Set(),
   selectedTargets: new Set(),
   bulkBusy: false,
@@ -972,6 +972,7 @@ function findingsQuery() {
   if (f.status) params.set('status', f.status);
   if (f.severity.size) params.set('severity', Array.from(f.severity).join(','));
   if (f.target) params.set('target_id', f.target);
+  if (f.target_q) params.set('target_q', f.target_q);
   if (f.rule) params.set('rule_id', f.rule);
   if (f.ai) params.set('ai_verdict', f.ai);
   if (f.q) params.set('q', f.q);
@@ -980,7 +981,12 @@ function findingsQuery() {
 
 async function renderFindings() {
   const q = parseHash().query;
-  if (q.target && state.filters.target !== q.target) { state.filters.target = q.target; state.filters.page = 0; }
+  if (q.target && state.filters.target !== q.target) {
+    state.filters.target = q.target;
+    state.filters.target_q = '';
+    state.filters.page = 0;
+    state.pendingTargetName = true;      // 拿到站点列表后回填搜索框
+  }
   if (q.rule && state.filters.rule !== q.rule) { state.filters.rule = q.rule; state.filters.page = 0; }
   if (q.severity) { state.filters.severity = new Set(q.severity.split(',')); }
   if (q.status !== undefined && q.status !== null && state.hash !== location.hash) state.filters.status = q.status;
@@ -993,6 +999,11 @@ async function renderFindings() {
   const targets = targetData.items || [];
   state.cache.targets = targets;
   state.cache.rules = rules.items;
+  if (state.pendingTargetName) {
+    const picked = targets.find((t) => String(t.id) === String(state.filters.target));
+    if (picked) state.filters.target_q = picked.name;
+    state.pendingTargetName = false;
+  }
 
   const f = state.filters;
   // 删完最后一页的发现后同样会越界, 回退到最后一页
@@ -1024,10 +1035,9 @@ async function renderFindings() {
         <div class="picker">
           ${Object.keys(SEVERITY).map((k) => `<button data-act="toggle-sev" data-sev="${k}" class="${f.severity.has(k) ? 'on' : ''}">${SEVERITY[k].label}</button>`).join('')}
         </div>
-        <select style="width:auto;min-width:150px" data-act="filter-target">
-          <option value="">全部站点</option>
-          ${targets.map((t) => `<option value="${t.id}"${String(f.target) === String(t.id) ? ' selected' : ''}>${esc(t.name)}</option>`).join('')}
-        </select>
+        <div class="search" style="width:180px">
+          ${icon('search')}<input type="text" id="f-target" placeholder="全部站点（输入搜索）" value="${esc(f.target_q || '')}">
+        </div>
         <select style="width:auto;min-width:150px" data-act="filter-rule">
           <option value="">全部规则</option>${ruleOptions}
         </select>
@@ -1096,6 +1106,26 @@ async function renderFindings() {
   qInput.oninput = () => {
     clearTimeout(timer);
     timer = setTimeout(() => { state.filters.q = qInput.value.trim(); state.filters.page = 0; refresh(); }, 320);
+  };
+
+  // 站点筛选改成搜索框: 输入即过滤(防抖 320ms), 重绘后把焦点还回来
+  const tInput = $('#f-target');
+  let tTimer = null;
+  const applyTarget = () => {
+    state.filters.target_q = tInput.value.trim();
+    state.filters.target = '';          // 文本搜索与 id 过滤互斥
+    state.filters.page = 0;
+    renderFindings().then(() => {
+      const el = $('#f-target');
+      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    });
+  };
+  tInput.oninput = () => {
+    clearTimeout(tTimer);
+    tTimer = setTimeout(applyTarget, 320);
+  };
+  tInput.onkeydown = (event) => {
+    if (event.key === 'Enter') { clearTimeout(tTimer); applyTarget(); }
   };
 
   // 支持 #/findings?finding=<id> 直接展开某条发现的详情
@@ -2846,8 +2876,7 @@ document.addEventListener('change', (event) => {
   const el = event.target.closest('[data-act]');
   if (!el) return;
   const act = el.dataset.act;
-  if (act === 'filter-target') { state.filters.target = el.value; state.filters.page = 0; renderFindings(); }
-  else if (act === 'filter-rule') { state.filters.rule = el.value; state.filters.page = 0; renderFindings(); }
+  if (act === 'filter-rule') { state.filters.rule = el.value; state.filters.page = 0; renderFindings(); }
   else if (act === 'filter-sort') { state.filters.sort = el.value; renderFindings(); }
   else if (act === 'filter-ai') { state.filters.ai = el.value; state.filters.page = 0; renderFindings(); }
   else if (act === 'toggle-gated') { /* 由点击分支处理 */ }
