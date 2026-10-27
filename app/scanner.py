@@ -283,8 +283,15 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                     visited.add(cand.url)
                     if not resp.ok:
                         result.assets_failed += 1
-                        if resp.error and resp.error != "binary" and len(errors) < 25:
-                            errors.append(f"{cand.url}: {resp.error or f'HTTP {resp.status}'}")
+                        failure = resp.error or (f"HTTP {resp.status}" if resp.status else "请求失败")
+                        optional_kind = (
+                            cand.kind in ("config", "api", "map")
+                            or cand.label == "chunk-map"
+                            or (cand.kind == "html" and cand.label != "入口页面")
+                        )
+                        optional_miss = optional_kind and resp.status in (401, 403, 404, 410)
+                        if failure != "binary" and not optional_miss and len(errors) < 25:
+                            errors.append(f"{cand.url}: {failure}")
                         continue
                     # 人机校验页不是站点自己的内容: 存下来会变成一堆假资产,
                     # 里面的 WAF 随机串还会被规则当成密钥(误报已经实际发生过)
