@@ -529,6 +529,30 @@ def test_external_scanner_timeout_kills_whole_process_group(monkeypatch) -> None
     assert killed == [43210]
 
 
+def test_external_scanner_cleanup_matches_unique_output_dir(monkeypatch) -> None:
+    from app import target_scanners
+
+    killed: list[int] = []
+
+    class Listing:
+        async def communicate(self):
+            return (
+                b"123 bash JSHawk.sh -o /tmp/jslw-job-42\n"
+                b"456 curl https://site.test -o /tmp/jslw-job-42/out\n"
+                b"789 unrelated-process\n",
+                b"",
+            )
+
+    async def fake_subprocess(*_args, **_kwargs):
+        return Listing()
+
+    monkeypatch.setattr(target_scanners.asyncio, "create_subprocess_exec", fake_subprocess)
+    monkeypatch.setattr(target_scanners.os, "kill",
+                        lambda pid, sig: killed.append(pid))
+    assert asyncio.run(target_scanners._kill_matching_processes("/tmp/jslw-job-42")) == 2
+    assert killed == [123, 456]
+
+
 MINI_HITS = [
     # 与内置引擎重叠 -> 应合并为同一条, 只追加来源
     {"rule": "aws-key", "severity": "critical", "secret": "AKIAJKQ7XH3MZ6BND4PA",

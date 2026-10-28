@@ -44,6 +44,30 @@ async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
         await asyncio.wait_for(proc.wait(), timeout=2)
 
 
+async def _kill_matching_processes(needle: str) -> int:
+    """终止命令行包含唯一输出目录的残留进程（含再次 setsid 的孙进程）。"""
+    try:
+        listing = await asyncio.create_subprocess_exec(
+            "ps", "-axo", "pid=,command=",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(listing.communicate(), timeout=3)
+    except (OSError, asyncio.TimeoutError):
+        return 0
+    killed = 0
+    for line in (stdout or b"").decode("utf-8", "replace").splitlines():
+        pid_text, _, command = line.strip().partition(" ")
+        if not pid_text.isdigit() or needle not in command:
+            continue
+        pid = int(pid_text)
+        if pid == os.getpid():
+            continue
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+    return killed
+
+
 @dataclass
 class ScanRunResult:
     hits: list[RawHit] = field(default_factory=list)
@@ -227,6 +251,9 @@ class JScanner2Scanner:
                 await _kill_process_tree(proc)
                 return ScanRunResult(error=f"执行超时 (>{self.timeout}s)",
                                      runtime_ms=int((time.monotonic() - started) * 1000))
+            except asyncio.CancelledError:
+                await _kill_process_tree(proc)
+                raise
             except OSError as exc:
                 return ScanRunResult(error=f"无法执行: {exc}")
             if proc.returncode not in (0, None):
@@ -393,10 +420,16 @@ class JSHawkScanner:
                 _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
             except asyncio.TimeoutError:
                 await _kill_process_tree(proc)
+                await _kill_matching_processes(str(outdir))
                 return ScanRunResult(error=f"执行超时 (>{self.timeout}s)",
                                      runtime_ms=int((time.monotonic() - started) * 1000))
+            except asyncio.CancelledError:
+                await _kill_process_tree(proc)
+                await _kill_matching_processes(str(outdir))
+                raise
             except OSError as exc:
                 return ScanRunResult(error=f"无法执行: {exc}")
+            await _kill_matching_processes(str(outdir))
             # 它的退出码: 0=没发现, 1=有发现, 2=出错。所以 1 是正常结果, 不是失败
             if proc.returncode not in (0, 1):
                 tail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()

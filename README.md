@@ -689,6 +689,9 @@ python3.10 tools/asset_recon.py --domain seres.cn --from-db --no-brute
 python3.10 tools/dedupe_assets.py            # 预演
 python3.10 tools/dedupe_assets.py --apply    # 执行（自动备份）
 
+# 外部构建清单 / 网关访问日志 与本地资产库做差集
+python3.10 tools/coverage.py --target-id 123 --manifest ./cdn-js-urls.txt
+
 # 改完接口跑一遍冒烟
 python3.10 tools/api_smoke.py --base http://127.0.0.1:8787
 ```
