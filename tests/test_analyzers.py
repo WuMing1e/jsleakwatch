@@ -91,6 +91,8 @@ def test_katana_keeps_api_endpoints_but_drops_binary_and_non_get(tmp_path: Path)
     write_stub(stub, [
         {"request": {"method": "GET", "endpoint": "http://site.test/api/v1/users?page=2"},
          "response": {"status_code": 200}},
+        {"request": {"method": "GET", "endpoint": "http://site.test/api/config.json"},
+         "response": {"status_code": 200}},
         {"request": {"method": "GET", "endpoint": "http://site.test/logo.png"},
          "response": {"status_code": 200}},
         {"request": {"method": "GET", "endpoint": "http://site.test/css/app.css"},
@@ -101,7 +103,9 @@ def test_katana_keeps_api_endpoints_but_drops_binary_and_non_get(tmp_path: Path)
     found = run(analyzers.KatanaDiscovery(binary=str(stub)).discover(
         {"base_url": "http://site.test/", "scope": "same-origin"}, analyzers.ScanConfig()))
     urls = [item.url for item in found]
+    kinds = {item.url: item.kind for item in found}
     assert "http://site.test/api/v1/users?page=2" in urls     # API 响应也值得扫
+    assert kinds["http://site.test/api/config.json"] == "api"
     assert not any("logo.png" in u or "app.css" in u for u in urls)
     assert not any("delete" in u for u in urls)               # 非 GET 不作为种子
 

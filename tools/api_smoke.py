@@ -123,9 +123,20 @@ def main() -> int:
 
     site, server = serve_fixture()
     created_target = created_rule = created_finding = None
-    saved_analyzers = saved_ai = None
+    saved_analyzers = saved_ai = saved_scan = None
     print(f"目标服务 {BASE} · 样例站点 {site}\n")
     try:
+        # 交互/无头采集对接口冒烟没有额外价值，还会让临时站点排到长扫描后面。
+        bootstrap = call("GET", "/api/settings")[1]
+        saved_scan = {
+            key: bootstrap["scan"].get(key)
+            for key in ("interactive_render", "headless_render", "max_assets_per_scan")
+        }
+        call("PUT", "/api/settings", {"scan": {
+            "interactive_render": False,
+            "headless_render": False,
+            "max_assets_per_scan": max(100, int(saved_scan["max_assets_per_scan"] or 0)),
+        }})
         if not args.with_scanners:
             # 整站扫描器自己会爬一遍, 单轮常有几分钟; 冒烟只关心接口, 先临时关掉
             current = call("GET", "/api/settings")[1]
@@ -206,7 +217,7 @@ def main() -> int:
         # ---------------- 站点 CRUD + 扫描 ----------------
         target = check("新增站点", "POST", "/api/targets",
                        body={"name": "smoke-临时站", "base_url": site,
-                             "interval_minutes": 1440, "max_assets": 30}, expect=201)
+                             "interval_minutes": 1440, "max_assets": 100}, expect=201)
         tid = target["id"]
         created_target = tid
         expect(target["base_url"] == site, "新建站点地址正确", target["base_url"])
@@ -310,6 +321,8 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - 冒烟脚本要跑完并给出汇总, 不能中途炸掉
         RESULTS.append(("脚本执行", "FAIL", f"{type(exc).__name__}: {exc}"[:200], 0.0))
     finally:
+        if saved_scan:
+            call("PUT", "/api/settings", {"scan": saved_scan})
         if saved_ai:
             call("PUT", "/api/settings", {"ai": saved_ai})
         if saved_analyzers:

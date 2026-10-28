@@ -174,9 +174,12 @@ class KatanaDiscovery:
             key = endpoint.split("#")[0]
             if key in out:
                 continue
+            kind = kind_from_url(endpoint)
+            if kind == "json":
+                kind = "api"
             out[key] = AssetCandidate(
                 url=endpoint,
-                kind=kind_from_url(endpoint),
+                kind=kind,
                 source=self.name,
                 note=(request.get("tag") or ""),
             )

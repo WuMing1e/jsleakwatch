@@ -253,7 +253,8 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
             engine = build_discovery("katana", discovery_cfg)
             try:
                 for item in await engine.discover(target, cfg):
-                    extra_seeds.append(Candidate(url=item.url, kind=kind_from_url(item.url),
+                    extra_seeds.append(Candidate(url=item.url,
+                                                 kind=item.kind or kind_from_url(item.url),
                                                  depth=0, label=f"{item.source}:{item.note}"))
             except Exception as exc:  # noqa: BLE001 - 外部工具失败不应中断扫描
                 errors.append(f"katana: {type(exc).__name__}: {exc}"[:200])

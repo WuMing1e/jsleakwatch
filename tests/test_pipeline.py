@@ -253,6 +253,34 @@ def test_headless_render_finds_runtime_only_addresses(prepared) -> None:
         db.set_setting("scan", previous)
 
 
+def test_interactive_render_stores_runtime_api_assets(prepared) -> None:
+    """Playwright 路由采集拿到的运行时请求也要进入统一接口资产。"""
+    import asyncio
+
+    from app.scanner import scan_target
+
+    target, db = prepared
+    previous = db.get_setting("scan") or {}
+    db.set_setting("scan", {
+        **previous,
+        "headless_render": True,
+        "interactive_render": True,
+        "max_render_pages": 2,
+        "render_wait_ms": 700,
+        "scan_api_endpoints": True,
+        "max_api_endpoints": 10,
+    })
+    try:
+        result = asyncio.run(scan_target(target))
+        api_assets = db.query(
+            "SELECT url FROM assets WHERE target_id=? AND kind='api'", (target["id"],))
+        assert result.status == "ok", result.error
+        assert any(row["url"].endswith("/api/runtime-config.json") for row in api_assets), \
+            f"运行时接口应落库, 实际: {[row['url'] for row in api_assets]}"
+    finally:
+        db.set_setting("scan", previous)
+
+
 # ------------------------------------------------------------ 抓取重试
 
 class _FakeStreamResponse:
