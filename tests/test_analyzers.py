@@ -359,6 +359,21 @@ def test_jscanner2_reader_is_safe_on_missing_or_broken_db(tmp_path: Path) -> Non
     assert read_jscanner2_hits(broken) == []
 
 
+def test_jscanner2_discovered_js_urls_are_importable(tmp_path: Path) -> None:
+    from app.target_scanners import read_jscanner2_urls
+
+    db_file = tmp_path / "r.db"
+    make_jscanner2_db(db_file, [
+        ("https://site.test/js/app.js", "secret-value-1", "ctx", "Med", "other", ""),
+        ("https://site.test/js/app.js", "secret-value-2", "ctx", "Med", "other", ""),
+        ("https://site.test/api/config", "secret-value-3", "ctx", "Med", "other", ""),
+        ("https://other.test/js/x.js", "secret-value-4", "ctx", "Med", "other", ""),
+    ])
+    assert read_jscanner2_urls(db_file, host="site.test") == [
+        "https://site.test/js/app.js",
+    ]
+
+
 def test_jscanner2_scanner_command_and_availability(tmp_path: Path) -> None:
     from app.target_scanners import JScanner2Scanner
 
@@ -453,12 +468,23 @@ def test_jshawk_report_is_read_and_normalized(tmp_path: Path) -> None:
 
 
 def test_jshawk_reader_is_safe_on_missing_or_broken_report(tmp_path: Path) -> None:
-    from app.target_scanners import read_jshawk_report
+    from app.target_scanners import read_jshawk_discovered_urls, read_jshawk_report
 
     assert read_jshawk_report(tmp_path / "nope.json") == []
+    assert read_jshawk_discovered_urls(tmp_path / "nope.txt") == []
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
     assert read_jshawk_report(broken) == []
+    discovered = tmp_path / "all_js_discovered.txt"
+    discovered.write_text(
+        "https://site.test/js/a.js\n"
+        "https://site.test/js/a.js\n"
+        "https://other.test/js/b.js\n",
+        encoding="utf-8",
+    )
+    assert read_jshawk_discovered_urls(discovered, host="site.test") == [
+        "https://site.test/js/a.js",
+    ]
 
 
 def test_jshawk_command_and_availability(tmp_path: Path) -> None:

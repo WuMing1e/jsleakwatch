@@ -215,6 +215,33 @@ def test_scheduler_instance_lock_and_orphan_cleanup(client) -> None:
     client.delete(f"/api/targets/{target['id']}")
 
 
+def test_external_manifest_coverage_diff(client) -> None:
+    """网关/CDN 清单与资产库差集要能给出真实缺失项。"""
+    from app import db
+
+    target = client.post("/api/targets", json={
+        "name": "覆盖核对站", "base_url": "https://coverage.test/app/",
+    }).json()
+    present = "https://coverage.test/app/main-AbCd1234.js"
+    missing = "https://coverage.test/app/lazy-EfGh5678.js"
+    db.execute(
+        "INSERT INTO assets(target_id,url,sha256,size,content_type,kind,first_seen_at,last_seen_at) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (target["id"], present, "sha", 10, "application/javascript", "script",
+         db.utcnow(), db.utcnow()),
+    )
+    result = client.post(f"/api/targets/{target['id']}/coverage-check", json={
+        "source": "cdn-log",
+        "text": f"GET /app/main-AbCd1234.js 200\nGET {missing} 200\n",
+    }).json()
+    assert result["expected"] == 2
+    assert result["covered"] == 1
+    assert result["missing"] == 1
+    assert result["coverage_pct"] == 50.0
+    assert result["missing_urls"] == [missing]
+    client.delete(f"/api/targets/{target['id']}")
+
+
 def test_findings_reuse_across_sites(client) -> None:
     """同一命中值出现在多个站点时, 列表要标出复用站点数, 详情要能互相跳。"""
     from app import db

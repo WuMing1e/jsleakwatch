@@ -47,6 +47,7 @@ async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
 @dataclass
 class ScanRunResult:
     hits: list[RawHit] = field(default_factory=list)
+    discovered_urls: list[str] = field(default_factory=list)
     runtime_ms: int = 0
     error: str = ""
     note: str = ""
@@ -126,6 +127,37 @@ def read_jscanner2_hits(db_path: str | Path, host: str = "", min_id: int = 0) ->
             url=row["js_url"] or "",
         ))
     return hits
+
+
+def read_jscanner2_urls(db_path: str | Path, host: str = "", min_id: int = 0) -> list[str]:
+    """读取 JScanner2 本轮涉及的 JS 地址，用于回写统一资产库。"""
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        where = ["js_url IS NOT NULL", "js_url <> ''"]
+        params: list[Any] = []
+        if host:
+            where.append("js_url LIKE ?")
+            params.append(f"%{host}%")
+        if min_id:
+            where.append("id > ?")
+            params.append(int(min_id))
+        rows = conn.execute(
+            "SELECT DISTINCT js_url FROM sensitive_info WHERE " + " AND ".join(where),
+            params,
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    return sorted({
+        str(row[0]).strip()
+        for row in rows
+        if str(row[0]).strip().startswith(("http://", "https://"))
+        and urlparse(str(row[0])).path.lower().endswith((".js", ".mjs", ".cjs"))
+    })
 
 
 @dataclass
@@ -208,8 +240,10 @@ class JScanner2Scanner:
             watermark = 0          # 结果库被轮换/重建过, 退化为按主机名全量导入
 
         hits = read_jscanner2_hits(db_file, host=host, min_id=watermark)
+        discovered_urls = read_jscanner2_urls(db_file, host=host, min_id=watermark)
         return ScanRunResult(
-            hits=hits, runtime_ms=int((time.monotonic() - started) * 1000),
+            hits=hits, discovered_urls=discovered_urls,
+            runtime_ms=int((time.monotonic() - started) * 1000),
             note=f"{len(hits)} 条命中 (模式 {self.mode}, AI {'由它判定' if self.use_ai else '由本系统判定'})")
 
 
@@ -260,6 +294,30 @@ def read_jshawk_report(report: str | Path, host: str = "") -> list[RawHit]:
             note=f"熵 {entropy}" if entropy else "",
         ))
     return hits
+
+
+def read_jshawk_discovered_urls(path: str | Path, host: str = "") -> list[str]:
+    """读取 JSHawk 本轮 all_js_discovered.txt，只保留目标主机的脚本地址。"""
+    report = Path(path)
+    if not report.exists():
+        return []
+    urls: set[str] = set()
+    try:
+        lines = report.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    host = (host or "").lower()
+    for raw in lines:
+        url = raw.strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        parsed = urlparse(url)
+        if not parsed.path.lower().endswith((".js", ".mjs", ".cjs")):
+            continue
+        if host and parsed.netloc.lower() not in host and host not in parsed.netloc.lower():
+            continue
+        urls.add(url)
+    return sorted(urls)
 
 
 @dataclass
@@ -350,14 +408,25 @@ class JSHawkScanner:
         if not reports and self.mode == "import":
             reports = sorted(self.results_root().glob("*/reports/jshawk.json"),
                              key=lambda p: p.stat().st_mtime)
+        discovered_urls: list[str] = []
+        if reports:
+            report = reports[-1]
+            hits = read_jshawk_report(report, host=host)
+            discovered_urls = read_jshawk_discovered_urls(
+                report.parent.parent / "all_js_discovered.txt", host=host)
+        else:
+            hits = []
+            discovered_urls = []
         if not reports:
             return ScanRunResult(
+                discovered_urls=discovered_urls,
                 runtime_ms=int((time.monotonic() - started) * 1000),
                 note="工具没有产出报告, 本轮按无命中处理")
-        hits = read_jshawk_report(reports[-1], host=host)
         return ScanRunResult(
-            hits=hits, runtime_ms=int((time.monotonic() - started) * 1000),
-            note=f"{len(hits)} 条命中 (报告 {reports[-1].parent.parent.name})")
+            hits=hits, discovered_urls=discovered_urls,
+            runtime_ms=int((time.monotonic() - started) * 1000),
+            note=f"{len(hits)} 条命中, JS 清单 {len(discovered_urls)} 条 "
+                 f"(报告 {reports[-1].parent.parent.name})")
 
 
 BUILDERS = {

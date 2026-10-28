@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, ai, asset_history, db, gating
+from . import __version__, ai, asset_history, coverage_manifest, db, gating
 from .config import BASE_DIR, SETTINGS
 from .importers.gitleaks import parse_toml, rule_to_dict
 from .analyzers import analyzer_specs
@@ -156,6 +156,11 @@ class RuleImportIn(BaseModel):
     toml: str = ""
     path: str = ""
     deactivate: bool = False
+
+
+class CoverageManifestIn(BaseModel):
+    text: str = ""
+    source: str = "manual"
 
 
 class RuleDraftIn(BaseModel):
@@ -667,6 +672,23 @@ async def trigger_scan(tid: int, full: bool = Query(default=True)) -> dict[str, 
         return {"queued": False, "reason": "该站点已在队列中"}
     db.log_event(f"手动触发扫描 {target['name']}", kind="scan", target_id=tid)
     return {"queued": True, "full": full}
+
+
+@app.post("/api/targets/{tid}/coverage-check")
+def check_target_coverage(tid: int, payload: CoverageManifestIn) -> dict[str, Any]:
+    """用网关/CDN日志或构建清单核对本地 JS 资产覆盖率。"""
+    target = _target_row(tid)
+    result = coverage_manifest.coverage_diff(target, payload.text)
+    if not result["expected"]:
+        raise HTTPException(400, "清单中没有识别到 .js/.mjs/.cjs 地址")
+    result["source"] = payload.source or "manual"
+    result["target_id"] = tid
+    db.log_event(
+        f"JS 覆盖核对: {target['name']} {result['covered']}/{result['expected']} "
+        f"({result['coverage_pct']}%)",
+        kind="coverage", target_id=tid,
+    )
+    return result
 
 
 # ---------------------------------------------------------------- 发现

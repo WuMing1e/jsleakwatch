@@ -924,6 +924,17 @@ function targetForm(t) {
         ${isEdit ? `<label class="switch"><input type="checkbox" id="f-enabled" ${data.enabled ? 'checked' : ''}><span class="track"></span>启用监测</label>` : ''}
       </div>
       <div class="field-hint">请只对自己拥有或已获得书面授权的站点开启监测。</div>
+      ${isEdit ? `
+      <div style="display:flex;flex-direction:column;gap:8px;border-top:1px solid #252d38;padding-top:12px">
+        <label class="field">外部 JS 清单 / 网关访问日志
+          <textarea id="f-coverage-text" rows="4" placeholder="粘贴构建清单、CDN 日志或每行一个 JS URL"></textarea>
+        </label>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn btn-sm" data-act="check-coverage" data-id="${t.id}">${icon('shield', 13)}核对覆盖率</button>
+          <span class="field-hint">与当前资产库做差集，只读核对，不主动请求清单地址。</span>
+        </div>
+        <div id="f-coverage-result"></div>
+      </div>` : ''}
     </div>
     <div class="modal-foot">
       <button class="btn" data-act="close-modal">取消</button>
@@ -972,6 +983,30 @@ async function saveTarget(id) {
     }
   } catch (err) {
     toast('保存失败: ' + err.message, 'err');
+  }
+}
+
+async function checkTargetCoverage(id) {
+  const text = $('#f-coverage-text').value.trim();
+  if (!text) { toast('请先粘贴外部 JS 清单或网关日志', 'err'); return; }
+  const button = $('[data-act="check-coverage"]');
+  button.disabled = true;
+  try {
+    const r = await api(`/api/targets/${id}/coverage-check`, {
+      method: 'POST',
+      body: JSON.stringify({ text, source: 'manual' }),
+    });
+    const missing = (r.missing_urls || []).map((url) =>
+      `<div class="mono" style="font-size:11.5px;word-break:break-all">${esc(url)}</div>`).join('');
+    $('#f-coverage-result').innerHTML = `
+      <div class="field-hint" style="font-size:12px">
+        清单 ${r.expected} 个，已采集 ${r.covered} 个，缺失 ${r.missing} 个，覆盖率 <b>${r.coverage_pct}%</b>
+      </div>
+      ${missing ? `<div style="display:flex;flex-direction:column;gap:5px;margin-top:7px">${missing}</div>` : ''}`;
+  } catch (err) {
+    toast('覆盖核对失败: ' + err.message, 'err');
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1892,6 +1927,7 @@ async function renderSettings() {
             <label class="switch"><input type="checkbox" id="s-raw-reveal" ${scan.store_raw_reveal ? 'checked' : ''}><span class="track"></span>命中值在界面明文显示（关掉则只显示掩码）</label>
             <label class="switch"><input type="checkbox" id="s-api" ${scan.scan_api_endpoints ? 'checked' : ''}><span class="track"></span>扫描接口响应 (只 GET 同源读接口)</label>
             <label class="switch"><input type="checkbox" id="s-headless" ${scan.headless_render ? 'checked' : ''}><span class="track"></span>无头浏览器渲染页面 (需 Chrome，明显更慢)</label>
+            <label class="switch"><input type="checkbox" id="s-interactive" ${scan.interactive_render ? 'checked' : ''}><span class="track"></span>Playwright 路由与 Tab 交互采集 (同源注入已授权 Cookie/请求头)</label>
           </div>
           <div class="form-row">
             <label class="field">单站接口上限 (条)
@@ -1900,10 +1936,13 @@ async function renderSettings() {
             </label>
             <label class="field">无头渲染页数 (个)
               <input type="number" id="s-renderpages" min="1" max="10" value="${esc(scan.max_render_pages || 1)}">
-              <span class="field-hint">渲染会执行页面 JS，能拿到运行时才出现的脚本与接口；走匿名请求，不带采集凭据。</span>
+              <span class="field-hint">启用交互采集时，会遍历同源链接并切换 Tab；凭据只注入目标同源请求。</span>
             </label>
             <label class="field">渲染等待 (毫秒)
               <input type="number" id="s-renderwait" min="500" max="30000" step="500" value="${esc(scan.render_wait_ms || 4000)}">
+            </label>
+            <label class="field">每页切换 Tab 上限
+              <input type="number" id="s-interactive-clicks" min="0" max="20" value="${esc(scan.interactive_max_clicks ?? 3)}">
             </label>
           </div>
           <div style="display:flex;gap:8px">
@@ -2262,6 +2301,8 @@ async function saveScanSettings() {
       headless_render: $('#s-headless').checked,
       max_render_pages: Number($('#s-renderpages').value || 1),
       render_wait_ms: Number($('#s-renderwait').value || 4000),
+      interactive_render: $('#s-interactive').checked,
+      interactive_max_clicks: Number($('#s-interactive-clicks').value || 0),
     },
     discovery: {
       backend: $('#s-discovery').value,
@@ -2543,6 +2584,7 @@ async function handleAction(el, evt) {
     return;
   }
   if (act === 'save-target') return saveTarget(el.dataset.id || null);
+  if (act === 'check-coverage') return checkTargetCoverage(el.dataset.id);
   if (act === 'edit-target') {
     let t = (state.cache.targets || []).find((x) => String(x.id) === el.dataset.id);
     if (!t) {

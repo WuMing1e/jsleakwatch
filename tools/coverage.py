@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app import db  # noqa: E402
+from app import coverage_manifest  # noqa: E402
 from app.config import SETTINGS  # noqa: E402
 from app.discover import Extractor  # noqa: E402
 from app.fetcher import Fetcher  # noqa: E402
@@ -94,6 +95,8 @@ def main() -> int:
     parser.add_argument("--target-id", type=int, required=True)
     parser.add_argument("--verify", action="store_true",
                         help="重新抓入口推导 manifest 并核对缺失项是否真实存在（会产生外部请求）")
+    parser.add_argument("--manifest",
+                        help="外部构建清单或网关/CDN日志文件，与本地资产库做差集")
     args = parser.parse_args()
 
     db.init_db()
@@ -184,6 +187,16 @@ def main() -> int:
     print(f"- 二进制/非文本资产按设计跳过；跨域脚本默认不采集"
           f"（当前 allow_cross_origin_js={cfg.allow_cross_origin_js}）")
     print(f"- TLS 校验 {cfg.verify_tls} · 单域限速 {cfg.per_host_delay_ms} ms/请求")
+
+    if args.manifest:
+        text = Path(args.manifest).read_text(encoding="utf-8", errors="replace")
+        diff = coverage_manifest.coverage_diff(target, text)
+        print("\n## 4. 外部清单覆盖差集")
+        print(f"- 清单 JS {diff['expected']} 个，已采集 {diff['covered']} 个，"
+              f"缺失 {diff['missing']} 个 → 覆盖率 {diff['coverage_pct']}%")
+        for url in diff["missing_urls"][:30]:
+            print(f"    - {url}")
+
     print("\n> 导致覆盖率不足的常见原因：达到深度/资产上限、请求被拦或 404、"
           "资产超过体积上限被截断、以及**需要登录或用户交互后才会加载的 JS**（无浏览器执行时采不到）。")
     return 0

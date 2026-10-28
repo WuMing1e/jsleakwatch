@@ -59,6 +59,7 @@ class ScanResult:
     render_note: str = ""      # 无头渲染的失败原因; 只是可选增强没跑成, 不算扫描失败
     analyzer_summary: dict[str, Any] = field(default_factory=dict)
     target_scanner_summary: dict[str, Any] = field(default_factory=dict)
+    discovered_js_urls: set[str] = field(default_factory=set)
 
 
 # ------------------------------------------------------------ 设置装配
@@ -84,6 +85,8 @@ def scan_config_from_settings(overrides: dict[str, Any] | None = None) -> ScanCo
         headless_render=SETTINGS.scan.headless_render,
         max_render_pages=SETTINGS.scan.max_render_pages,
         render_wait_ms=SETTINGS.scan.render_wait_ms,
+        interactive_render=SETTINGS.scan.interactive_render,
+        interactive_max_clicks=SETTINGS.scan.interactive_max_clicks,
     )
     stored = db.get_setting("scan") or {}
     for key, value in stored.items():
@@ -145,40 +148,56 @@ async def collect_runtime_seeds(
     base = target["base_url"]
     seeds: list[Candidate] = []
     notes: list[str] = []
-    pages = [base]
     seen: set[str] = set()
     api_budget = max(0, int(cfg.max_api_endpoints or 0))
-    for page in pages[: max(1, int(cfg.max_render_pages or 1))]:
-        result = await render_page(page, timeout=max(10.0, cfg.timeout_seconds + 15),
-                                   wait_ms=max(500, int(cfg.render_wait_ms or 4000)))
-        if not result.ok:
-            notes.append(f"无头渲染失败: {result.error}")
-            continue
-        for cand in extractor.from_html(page, result.dom, 0):
+    rendered_pages: list[tuple[str, str]] = []
+    runtime_requests: list[tuple[str, str]] = []
+
+    if cfg.interactive_render:
+        from .browser_crawl import interactive_crawl
+        crawl = await interactive_crawl(base, cfg)
+        rendered_pages = crawl.pages
+        runtime_requests = crawl.requests
+        notes.extend(f"交互采集: {error}" for error in crawl.errors[:5])
+        if not crawl.ok and not crawl.errors:
+            notes.append("交互采集没有拿到页面")
+    else:
+        for page in [base][: max(1, int(cfg.max_render_pages or 1))]:
+            result = await render_page(page, timeout=max(10.0, cfg.timeout_seconds + 15),
+                                       wait_ms=max(500, int(cfg.render_wait_ms or 4000)))
+            if not result.ok:
+                notes.append(f"无头渲染失败: {result.error}")
+                continue
+            rendered_pages.append((page, result.dom))
+            runtime_requests.extend(result.requests)
+
+    for page_url, dom in rendered_pages:
+        for cand in extractor.from_html(page_url, dom, 0):
             if cand.url not in seen:
                 seen.add(cand.url)
                 seeds.append(cand)
-        for method, url in result.requests:
-            kind = kind_from_url(url)
-            path = urlparse(url).path.lower()
-            cross_origin_script = (
-                cfg.allow_cross_origin_js
-                and path.endswith((".js", ".mjs", ".cjs"))
-            )
-            if (method != "GET" or is_static_asset(url)
-                    or not (same_origin(url, base) or cross_origin_script)
-                    or not extractor.accepts(url, kind)
-                    or url.split("#")[0] in seen):
+    for method, url in runtime_requests:
+        kind = kind_from_url(url)
+        path = urlparse(url).path.lower()
+        cross_origin_script = (
+            cfg.allow_cross_origin_js
+            and path.endswith((".js", ".mjs", ".cjs"))
+        )
+        if (method != "GET" or is_static_asset(url)
+                or not (same_origin(url, base) or cross_origin_script)
+                or not extractor.accepts(url, kind)
+                or url.split("#")[0] in seen):
+            continue
+        if url.split("#")[0] == base:
+            continue
+        if kind == "json":
+            if api_budget <= 0:
                 continue
-            if url.split("#")[0] == base:
-                continue
-            if kind == "json":
-                if api_budget <= 0:
-                    continue
-                api_budget -= 1
-                kind = "api"
-            seen.add(url.split("#")[0])
-            seeds.append(Candidate(url=url, kind=kind, depth=0, label="无头渲染运行时请求"))
+            api_budget -= 1
+            kind = "api"
+        seen.add(url.split("#")[0])
+        label = "Playwright 路由请求" if cfg.interactive_render else "无头渲染运行时请求"
+        seeds.append(Candidate(url=url, kind=kind, depth=0, label=label))
     return seeds, notes
 
 
@@ -459,6 +478,8 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
         target_scanners = enabled_target_scanners()
         if target_scanners:
             await _target_scanner_phase(target, target_scanners, seen_keys, result, context_texts)
+            if result.discovered_js_urls:
+                await _ingest_discovered_js(target, result, seen_keys)
 
         # AI 判定放在最后: 规则、逐资产分析器、整站扫描器的命中一起判, 口径统一
         semantic_ran = False
@@ -1017,11 +1038,14 @@ async def _target_scanner_phase(
         try:
             run = await scanner.scan(target)
         except Exception as exc:  # noqa: BLE001 - 外部工具异常不应中断扫描
-            summary[scanner.name] = {"hits": 0, "new": 0, "merged": 0, "runtime_ms": 0,
+            summary[scanner.name] = {"hits": 0, "new": 0, "merged": 0, "discovered": 0,
+                                     "runtime_ms": 0,
                                      "error": f"{type(exc).__name__}: {exc}"[:200], "note": ""}
             continue
         info = {"hits": len(run.hits), "new": 0, "merged": 0, "fragments": 0,
+                "discovered": len(run.discovered_urls),
                 "runtime_ms": run.runtime_ms, "error": run.error, "note": run.note}
+        result.discovered_js_urls.update(run.discovered_urls)
         for hit in run.hits:
             asset_url = getattr(hit, "url", "") or target["base_url"]
             # 外部工具给的"上下文"未必在命中位置: JSHawk 给的是文件开头 200 字符,
@@ -1045,7 +1069,8 @@ async def _target_scanner_phase(
 
     result.target_scanner_summary = summary
     parts = [
-        f"{name} 命中 {info['hits']} 新增 {info['new']} 合并 {info['merged']}"
+        f"{name} 命中 {info['hits']} 发现 JS {info['discovered']} "
+        f"新增 {info['new']} 合并 {info['merged']}"
         + (f" 跳过碎片 {info['fragments']}" if info.get("fragments") else "")
         for name, info in summary.items()
     ]
@@ -1054,6 +1079,119 @@ async def _target_scanner_phase(
         db.log_event("整站扫描器: " + "; ".join(parts)
                      + (f"; 错误 {errors[0][:120]}" if errors else ""),
                      kind="scanner", level="warn" if errors else "info", target_id=target_id)
+
+
+async def _ingest_discovered_js(
+    target: dict[str, Any],
+    result: ScanResult,
+    seen_keys: set[str],
+) -> None:
+    """把 JSHawk/JScanner2 发现的 JS 清单回写到统一资产库并补充检测。"""
+    target_id = int(target["id"])
+    cfg = scan_config_from_settings()
+    max_assets = int(target.get("max_assets") or cfg.max_assets_per_scan)
+    budget = max(0, min(5000, max_assets - result.assets_fetched))
+    if budget <= 0 or not result.discovered_js_urls:
+        return
+
+    extractor = Extractor(
+        base_url=target["base_url"],
+        scope=target.get("scope") or "same-origin",
+        follow_sourcemaps=bool(target.get("include_sourcemaps", 1)) and cfg.follow_sourcemaps,
+        scan_api=False,
+        allow_cross_origin_scripts=bool(cfg.allow_cross_origin_js),
+    )
+    detector = build_detector()
+    revision = rules_revision()
+    stored = {
+        row["url"]: {k: row[k] for k in row.keys()}
+        for row in db.query("SELECT * FROM assets WHERE target_id=?", (target_id,))
+    }
+    frontier = [
+        Candidate(url=url, kind="script", depth=0, label="外部工具发现")
+        for url in sorted(result.discovered_js_urls)
+        if extractor.accepts(url, "script")
+    ]
+    visited: set[str] = set()
+    content_seen: set[str] = set()
+    ingested = 0
+    detections: list[tuple[str, str, Detection]] = []
+
+    async with Fetcher(cfg) as fetcher:
+        while frontier and ingested < budget:
+            batch = [cand for cand in frontier[: budget - ingested] if cand.url not in visited]
+            frontier = frontier[len(batch):]
+            if not batch:
+                break
+            responses = await asyncio.gather(*[fetcher.get(cand.url) for cand in batch])
+            next_batch: dict[str, Candidate] = {}
+            for cand, resp in zip(batch, responses):
+                visited.add(cand.url)
+                if not resp.ok:
+                    result.assets_failed += 1
+                    continue
+                if not resp.text:
+                    continue
+                sha = hashlib.sha256(resp.text.encode("utf-8", "ignore")).hexdigest()
+                if sha in content_seen:
+                    result.assets_duplicate += 1
+                    continue
+                content_seen.add(sha)
+                ingested += 1
+                result.assets_fetched += 1
+                asset_id, is_new = _upsert_asset(target_id, cand, resp, sha)
+                result.assets_new += int(is_new)
+                prev = stored.get(cand.url)
+                unchanged = (
+                    bool(prev)
+                    and prev.get("sha256") == sha
+                    and prev.get("revision") == revision
+                    and not prev.get("recheck")
+                )
+                if unchanged:
+                    result.assets_skipped += 1
+                    for row in db.query(
+                            "SELECT fingerprint FROM findings WHERE asset_id=? "
+                            "AND status IN ('new','open')", (asset_id,)):
+                        seen_keys.add(row["fingerprint"])
+                else:
+                    async with _detect_lock():
+                        asset_dets = await asyncio.to_thread(
+                            _detect, detector, resp.text, target_id, cand.url,
+                            cfg.store_raw_secrets,
+                        )
+                    recorded = await asyncio.to_thread(
+                        asset_history.record_version,
+                        target_id, asset_id, cand.url, resp.text, sha,
+                        secret_hashes=[det.sha256 for det in asset_dets],
+                        findings=len(asset_dets),
+                    )
+                    result.assets_changed += int(bool(recorded.get("changed")))
+                    detections.extend((cand.url, cand.kind, det) for det in asset_dets)
+
+                for child in await asyncio.to_thread(
+                        extractor.from_js, cand.url, resp.text, cand.depth):
+                    if child.kind in ("script", "map"):
+                        next_batch.setdefault(child.url, child)
+            frontier.extend(c for url, c in next_batch.items() if url not in visited)
+
+    for asset_url, kind, det in detections:
+        row = db.query_one("SELECT id FROM assets WHERE target_id=? AND url=?",
+                           (target_id, asset_url))
+        asset_id = row["id"] if row else None
+        is_new, reopened, finding_id, upgraded = _upsert_finding(
+            target_id, asset_id, asset_url, det)
+        seen_keys.add(det.fingerprint)
+        if is_new or reopened or upgraded:
+            result.new_findings.append(
+                _finding_payload(target_id, det, asset_url, reopened, finding_id,
+                                 upgraded=upgraded))
+
+    db.log_event(
+        f"外部工具 JS 清单回写: 候选 {len(result.discovered_js_urls)} 个, "
+        f"本轮取到 {ingested} 个, 新发现 {len(result.new_findings)} 条",
+        kind="scanner", target_id=target_id,
+    )
 
 
 def _row_payload(row: Any, asset_url: str, reopened: bool) -> dict[str, Any]:

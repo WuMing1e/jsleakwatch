@@ -16,6 +16,7 @@
 | 资产发现 | HTML `<script>` / `modulepreload` / `preload` / `prefetch` / 内联脚本、JS 内动态 `import()`、**webpack/Next.js chunk 映射**、`sourceMappingURL` 映射文件、常见配置入口探测 |
 | 接口响应采集（可选） | 从 JS 里挑出应用自己以 **GET 语义**调用的同源接口地址（模板串、静态资源、跨域地址一律跳过，不猜参数），按同一套限速抓回来当资产扫描 —— 覆盖"配置和密钥从接口下发"这一类 |
 | 无头渲染（可选） | 用本机 Chrome/Chromium 把入口页面真跑一遍：`--dump-dom` 拿执行后的 DOM（动态插入的脚本不再漏），`--log-net-log` 拿这次加载的全部请求并只取同源 GET —— 运行时才拼出来的接口地址也能进扫描。默认关闭，走匿名请求。**渲染是全局串行的**：实测多个 headless 实例会互相拖死（单跑 8 秒，4 个并发全部超时），所以无论并行扫描多少个站，同一时刻只跑一个 Chrome（`JSLW_RENDER_CONCURRENCY` 可调）。渲染失败只算告警，不影响扫描结论 |
+| Playwright 交互采集（可选） | 遍历同源链接、滚动页面并切换 `role=tab`，收集路由加载期间的 JS 与 GET 请求；已配置的 Cookie/额外请求头只注入目标同源，不扩散到第三方。不点击提交、删除、退出等高风险操作 |
 | 检测引擎 | 78 条规则 + 香农熵校验 + 关键词预过滤 + 占位符/代码路径过滤 + 重叠消歧 + 字符串拼接还原 |
 | 规则可运营 | 在线写自定义规则：正则 + 样例当场验证（走同一套过滤，会告诉你是"没匹配"还是"被占位符/熵值/白名单挡掉"）；规则质量卡用真实命中 + AI 复核结果算出每条规则的误报率并给出降级/关闭建议；`tools/rules_quality.py` 在标注语料上跑 precision/recall，可当回归门槛 |
 | 变更比对 | 以 `规则ID + 命中值哈希` 生成指纹；只对**新出现**或**复现**的凭证告警，消失的自动转「已失效」 |
@@ -453,6 +454,7 @@ JSLW_AI_BASE_URL=http://glm.corp.example.com/v1 JSLW_AI_MODEL=glm-5.2
 | POST | `/api/targets/{id}/scan?full=true` | 手动触发扫描，`full` 忽略增量跳过 |
 | POST | `/api/targets/bulk` | 站点批量操作：`{"ids":[...],"action":"enable\|disable\|scan\|interval\|delete","interval_minutes":1440}` |
 | POST | `/api/targets/import` | 批量新增站点：粘贴多行域名或 `text` 字段，自动补协议、按主机去重、跳过已存在的站点；返回 `created/skipped/invalid` 明细（单次上限 5000） |
+| POST | `/api/targets/{id}/coverage-check` | 接收网关/CDN日志或构建清单文本，与本地资产库做 JS 差集，返回覆盖率与缺失 URL |
 | GET | `/api/findings` | 发现列表，支持 `status/severity/target_id/rule_id/category/q/sort/limit/offset` |
 | GET/PATCH/DELETE | `/api/findings/{id}` | 详情 / 改状态与备注 / 删除单条 |
 | POST | `/api/findings/bulk` | 批量改状态；`{"ids":[...],"action":"delete"}` 批量删除 |
@@ -504,6 +506,8 @@ JSLW_AI_BASE_URL=http://glm.corp.example.com/v1 JSLW_AI_MODEL=glm-5.2
 | `headless_render` | 关 | 是否用无头浏览器渲染页面（需本机 Chrome/Chromium）。渲染**全局串行**，单页约 6~10 秒；并发跑多个 headless 实例会互相拖死，所以并行扫多少站都只同时跑一个 Chrome（`JSLW_RENDER_CONCURRENCY` 可调）。渲染失败只记告警，不影响扫描结论 |
 | `max_render_pages` | 1 | 单站单轮最多渲染几个页面 |
 | `render_wait_ms` | 4000 | 渲染等待时间（Chrome 虚拟时间预算） |
+| `interactive_render` | 关 | 用 Playwright 遍历同源路由并切换 Tab，补运行时脚本与接口 |
+| `interactive_max_clicks` | 3 | 每个页面最多切换几个 Tab |
 
 AI 相关配置（「系统设置 → AI 复核」，也可用 `JSLW_AI_*` 环境变量兜底）：
 

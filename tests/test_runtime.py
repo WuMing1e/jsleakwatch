@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 os.environ["JSLW_DATA_DIR"] = tempfile.mkdtemp(prefix="jslw-runtime-")
 
 from app import db, runtime  # noqa: E402
+from app.browser_crawl import InteractiveCrawlResult, acceptable_route, cookie_records  # noqa: E402
 from app.config import ScanConfig  # noqa: E402
 from app.discover import Extractor  # noqa: E402
 from app.scanner import collect_runtime_seeds  # noqa: E402
@@ -114,3 +115,39 @@ def test_collect_runtime_seeds_reports_missing_chrome(monkeypatch) -> None:
     seeds, notes = asyncio.run(collect_runtime_seeds({"id": 1, "base_url": "http://t/"},
                                                     cfg, Extractor(base_url="http://t/")))
     assert seeds == [] and notes and "Chrome" in notes[0]
+
+
+def test_interactive_route_scope_and_cookie_parsing() -> None:
+    assert acceptable_route("http://t/admin/users", "http://t/")
+    assert not acceptable_route("http://t/static/app.js", "http://t/")
+    assert not acceptable_route("http://t/logout", "http://t/")
+    assert not acceptable_route("https://evil.test/page", "http://t/")
+    assert cookie_records("sid=abc; theme=dark", "https://site.test/app") == [
+        {"name": "sid", "value": "abc", "url": "https://site.test", "path": "/"},
+        {"name": "theme", "value": "dark", "url": "https://site.test", "path": "/"},
+    ]
+
+
+def test_collect_runtime_seeds_uses_interactive_crawl(monkeypatch) -> None:
+    from app import browser_crawl
+
+    monkeypatch.setattr(runtime, "find_chrome", lambda: "/fake/chrome")
+
+    async def fake_crawl(_base, _cfg):
+        return InteractiveCrawlResult(
+            ok=True,
+            pages=[("http://t/dashboard", '<script src="/js/admin-123456.js"></script>')],
+            requests=[("GET", "http://t/api/route-list.json")],
+        )
+
+    monkeypatch.setattr(browser_crawl, "interactive_crawl", fake_crawl)
+    cfg = ScanConfig(headless_render=True, interactive_render=True,
+                     max_render_pages=5, max_api_endpoints=5)
+    seeds, notes = asyncio.run(collect_runtime_seeds(
+        {"id": 1, "base_url": "http://t/"}, cfg,
+        Extractor(base_url="http://t/", scope="same-origin"),
+    ))
+    found = {c.url: c.kind for c in seeds}
+    assert notes == []
+    assert found["http://t/js/admin-123456.js"] == "script"
+    assert found["http://t/api/route-list.json"] == "api"

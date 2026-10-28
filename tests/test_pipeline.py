@@ -789,6 +789,59 @@ def test_http_error_on_entry_marks_scan_failed(prepared) -> None:
     assert Handler.requests == ["/"], "入口失败后不应继续并发配置探针"
 
 
+def test_external_scanner_discovered_js_is_ingested(
+        prepared, monkeypatch) -> None:
+    """JSHawk/JScanner2 发现的 JS 要回写资产库并走统一检测。"""
+    import asyncio
+
+    from app import scanner
+    from app.target_scanners import ScanRunResult
+
+    _target, db = prepared
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path.startswith("/app.js"):
+                body, ctype = b"var a = 1;", "application/javascript"
+            elif self.path.startswith("/external.js"):
+                body = b'var aws = "AKIA3XQ7ZP2LMN4KQ7DA";'
+                ctype = "application/javascript"
+            else:
+                body = b'<html><script src="/app.js"></script></html>'
+                ctype = "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server, url = _serve(Handler)
+    external_url = url + "external.js"
+
+    class FakeScanner:
+        name = "fake-discovery"
+
+        async def scan(self, _target):
+            return ScanRunResult(discovered_urls=[external_url])
+
+    monkeypatch.setattr(scanner, "enabled_target_scanners", lambda: [FakeScanner()])
+    try:
+        target = _new_target(db, url)
+        result = asyncio.run(scanner.scan_target(target))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert external_url in result.discovered_js_urls
+    assert db.query_one("SELECT id FROM assets WHERE target_id=? AND url=?",
+                        (target["id"], external_url)) is not None
+    assert db.query_one("SELECT id FROM findings WHERE target_id=? AND rule_id=?",
+                        (target["id"], "aws-access-key-id")) is not None
+
+
 def test_identical_content_is_stored_only_once(prepared) -> None:
     """SPA 对任意路径都返回同一个页面时, 只存一份, 别把它拆成几十个资产。"""
     _target, db = prepared
