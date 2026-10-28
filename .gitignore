@@ -26,6 +26,10 @@ outputs/reports/
 # (要纳入版本管理就删掉这一行)
 outputs/assets/
 
+# 批量导入用的真实目标清单, 只保留在本机
+/sai.txt
+/targets.txt
+
 # 临时文件
 work/*.log
 work/dns-cache.json
