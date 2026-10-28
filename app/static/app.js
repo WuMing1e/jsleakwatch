@@ -305,9 +305,24 @@ function barChart(series) {
     return `<line class="axis" x1="${padL}" y1="${y}" x2="${w - 6}" y2="${y}"/>` +
       `<text class="lbl" x="4" y="${y + 3}">${Math.round(max * f)}</text>`;
   }).join('');
-  const labels = series.map((d, i) => (i % 7 === 0 || i === series.length - 1)
-    ? `<text class="lbl" x="${(padL + i * step + step / 2 - 12).toFixed(1)}" y="${h - 5}">${d.date.slice(5)}</text>`
-    : '').join('');
+  const labelIndices = [];
+  for (let i = 0; i < series.length; i += 7) labelIndices.push(i);
+  const lastIndex = series.length - 1;
+  if (lastIndex >= 0 && labelIndices[labelIndices.length - 1] !== lastIndex) {
+    // 30 天窗口下 28 日和 29 日只差一个刻度, 两个标签会叠在一起。
+    // 最后一个日期优先: 距离不足 5 个刻度时替换前一个标签。
+    if (lastIndex - labelIndices[labelIndices.length - 1] < 5) {
+      labelIndices[labelIndices.length - 1] = lastIndex;
+    } else {
+      labelIndices.push(lastIndex);
+    }
+  }
+  const labels = labelIndices.map((i) => {
+    const isLast = i === lastIndex;
+    const x = isLast ? w - 6 : padL + i * step + step / 2;
+    const anchor = isLast ? 'end' : 'middle';
+    return `<text class="lbl" text-anchor="${anchor}" x="${x.toFixed(1)}" y="${h - 5}">${series[i].date.slice(5)}</text>`;
+  }).join('');
   return `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="height:150px">${grid}${bars}${labels}</svg>`;
 }
 
