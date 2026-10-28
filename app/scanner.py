@@ -159,12 +159,19 @@ async def collect_runtime_seeds(
                 seen.add(cand.url)
                 seeds.append(cand)
         for method, url in result.requests:
-            if (method != "GET" or not same_origin(url, base)
-                    or is_static_asset(url) or url.split("#")[0] in seen):
+            kind = kind_from_url(url)
+            path = urlparse(url).path.lower()
+            cross_origin_script = (
+                cfg.allow_cross_origin_js
+                and path.endswith((".js", ".mjs", ".cjs"))
+            )
+            if (method != "GET" or is_static_asset(url)
+                    or not (same_origin(url, base) or cross_origin_script)
+                    or not extractor.accepts(url, kind)
+                    or url.split("#")[0] in seen):
                 continue
             if url.split("#")[0] == base:
                 continue
-            kind = kind_from_url(url)
             if kind == "json":
                 if api_budget <= 0:
                     continue
@@ -197,6 +204,7 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
         follow_sourcemaps=bool(target.get("include_sourcemaps", 1)) and cfg.follow_sourcemaps,
         scan_api=bool(cfg.scan_api_endpoints),
         max_api=max(0, int(cfg.max_api_endpoints or 0)),
+        allow_cross_origin_scripts=bool(cfg.allow_cross_origin_js),
     )
 
     seen_keys: set[str] = set()          # 本轮出现过的 fingerprint

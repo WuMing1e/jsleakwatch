@@ -30,6 +30,31 @@ def test_html_scripts_and_inline() -> None:
     assert len(inline) == 1 and "apiKey" in inline[0].inline
 
 
+def test_prefetched_scripts_are_discovered() -> None:
+    html = """
+    <link rel="modulepreload" href="/assets/app-AbCd1234.js">
+    <link rel="prefetch" href="/assets/lazy-EfGh5678.js">
+    <link rel="prefetch" href="/assets/style.css">
+    """
+    scripts = {c.url for c in extractor().from_html(BASE, html, 0) if c.kind == "script"}
+    assert "https://shop.example.com/assets/app-AbCd1234.js" in scripts
+    assert "https://shop.example.com/assets/lazy-EfGh5678.js" in scripts
+    assert not any(url.endswith(".css") for url in scripts)
+
+
+def test_cross_origin_script_switch_only_allows_scripts() -> None:
+    html = """
+    <script src="https://cdn.other.com/lib.js"></script>
+    <a href="https://cdn.other.com/page">跨域页面</a>
+    """
+    assert extractor().from_html(BASE, html, 0) == []
+
+    cross = Extractor(base_url=BASE, scope="same-origin",
+                      allow_cross_origin_scripts=True)
+    candidates = cross.from_html(BASE, html, 0)
+    assert {c.url for c in candidates} == {"https://cdn.other.com/lib.js"}
+
+
 def test_js_dynamic_import_and_sourcemap() -> None:
     js = 'import("/js/lazy.js");\n//# sourceMappingURL=app.js.map'
     found = extractor().from_js("https://shop.example.com/js/app.js", js, 0)

@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 HTML_SCRIPT_RE = re.compile(
     r"""<script[^>]*\ssrc\s*=\s*["']([^"'>]+)["']""", re.I)
 HTML_MODULEPRELOAD_RE = re.compile(
-    r"""<link[^>]*\srel\s*=\s*["'](?:modulepreload|preload)["'][^>]*>""", re.I)
+    r"""<link[^>]*\srel\s*=\s*["'](?:modulepreload|preload|prefetch)["'][^>]*>""", re.I)
 HTML_HREF_RE = re.compile(r"""href\s*=\s*["']([^"'>]+)["']""", re.I)
 HTML_INLINE_SCRIPT_RE = re.compile(
     r"""<script(?![^>]*\ssrc=)[^>]*>(.*?)</script>""", re.I | re.S)
@@ -130,20 +130,26 @@ class Extractor:
     max_synth_chunks: int = 200
     scan_api: bool = False          # 是否顺带采集接口响应（默认关，属于额外请求）
     max_api: int = 30               # 单个站点最多抓几个接口
+    allow_cross_origin_scripts: bool = False
     stats: dict[str, int] = field(default_factory=dict)
 
-    def _keep(self, url: str) -> bool:
+    def _keep(self, url: str, kind: str = "script") -> bool:
         if not url.startswith(("http://", "https://")):
             return False
         if self.scope == "same-origin":
-            return same_origin(url, self.base_url)
+            if same_origin(url, self.base_url):
+                return True
+            return self.allow_cross_origin_scripts and kind in ("script", "map")
         if self.scope == "same-host":
             return urlparse(url).netloc.lower() == urlparse(self.base_url).netloc.lower()
         return True  # any
 
+    def accepts(self, url: str, kind: str = "script") -> bool:
+        return self._keep(url, kind)
+
     def _add(self, out: dict[str, Candidate], url: str, kind: str, depth: int, label: str = "") -> None:
         url = url.split("#")[0]
-        if not self._keep(url):
+        if not self._keep(url, kind):
             return
         if kind == "html" and NON_PAGE_EXT.search(urlparse(url).path):
             return
@@ -211,7 +217,7 @@ class Extractor:
             target = urljoin(page_url, href.strip())
             if not target.startswith(("http://", "https://")):
                 continue
-            if not self._keep(target):
+            if not self._keep(target, "html"):
                 continue
             if NON_PAGE_EXT.search(urlparse(target).path):
                 continue

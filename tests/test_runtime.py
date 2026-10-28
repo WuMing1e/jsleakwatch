@@ -88,6 +88,26 @@ def test_collect_runtime_seeds_picks_dom_and_get_requests(monkeypatch) -> None:
     assert sum(1 for c in seeds if c.url == "http://t/js/app.js") == 1
 
 
+def test_runtime_can_collect_cross_origin_scripts_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(runtime, "find_chrome", lambda: "/fake/chrome")
+    monkeypatch.setattr(runtime, "render_page", _stub_render(
+        "<html></html>",
+        [
+            ("GET", "https://cdn.other.com/chunk-AbCd1234.js"),
+            ("GET", "https://analytics.other.com/collect"),
+        ],
+    ))
+    target = {"id": 1, "base_url": "http://t/"}
+    extractor = Extractor(base_url="http://t/", scope="same-origin",
+                          allow_cross_origin_scripts=True)
+    cfg = ScanConfig(headless_render=True, max_render_pages=1,
+                     allow_cross_origin_js=True)
+    seeds, _ = asyncio.run(collect_runtime_seeds(target, cfg, extractor))
+    urls = {c.url for c in seeds}
+    assert "https://cdn.other.com/chunk-AbCd1234.js" in urls
+    assert "https://analytics.other.com/collect" not in urls
+
+
 def test_collect_runtime_seeds_reports_missing_chrome(monkeypatch) -> None:
     monkeypatch.setattr(runtime, "find_chrome", lambda: None)
     cfg = ScanConfig(headless_render=True)
