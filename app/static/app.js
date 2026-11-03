@@ -1928,6 +1928,7 @@ async function renderSettings() {
             <label class="switch"><input type="checkbox" id="s-api" ${scan.scan_api_endpoints ? 'checked' : ''}><span class="track"></span>扫描接口响应 (只 GET 同源读接口)</label>
             <label class="switch"><input type="checkbox" id="s-headless" ${scan.headless_render ? 'checked' : ''}><span class="track"></span>无头浏览器渲染页面 (需 Chrome，明显更慢)</label>
             <label class="switch"><input type="checkbox" id="s-interactive" ${scan.interactive_render ? 'checked' : ''}><span class="track"></span>Playwright 路由与 Tab 交互采集 (同源注入已授权 Cookie/请求头)</label>
+            <label class="switch"><input type="checkbox" id="s-ai-discovery" ${scan.ai_discovery ? 'checked' : ''}><span class="track"></span>AI 第二阶段探索采集 (确定性采集后运行)</label>
           </div>
           <div class="form-row">
             <label class="field">单站接口上限 (条)
@@ -1943,6 +1944,12 @@ async function renderSettings() {
             </label>
             <label class="field">每页切换 Tab 上限
               <input type="number" id="s-interactive-clicks" min="0" max="20" value="${esc(scan.interactive_max_clicks ?? 3)}">
+            </label>
+            <label class="field">AI 探索动作上限
+              <input type="number" id="s-ai-actions" min="0" max="50" value="${esc(scan.ai_discovery_max_actions ?? 12)}">
+            </label>
+            <label class="field">AI 规划调用上限
+              <input type="number" id="s-ai-calls" min="0" max="20" value="${esc(scan.ai_discovery_max_calls ?? 4)}">
             </label>
           </div>
           <div style="display:flex;gap:8px">
@@ -2303,6 +2310,9 @@ async function saveScanSettings() {
       render_wait_ms: Number($('#s-renderwait').value || 4000),
       interactive_render: $('#s-interactive').checked,
       interactive_max_clicks: Number($('#s-interactive-clicks').value || 0),
+      ai_discovery: $('#s-ai-discovery').checked,
+      ai_discovery_max_actions: Number($('#s-ai-actions').value || 0),
+      ai_discovery_max_calls: Number($('#s-ai-calls').value || 0),
     },
     discovery: {
       backend: $('#s-discovery').value,

@@ -87,6 +87,10 @@ def scan_config_from_settings(overrides: dict[str, Any] | None = None) -> ScanCo
         render_wait_ms=SETTINGS.scan.render_wait_ms,
         interactive_render=SETTINGS.scan.interactive_render,
         interactive_max_clicks=SETTINGS.scan.interactive_max_clicks,
+        ai_discovery=SETTINGS.scan.ai_discovery,
+        ai_discovery_max_actions=SETTINGS.scan.ai_discovery_max_actions,
+        ai_discovery_max_calls=SETTINGS.scan.ai_discovery_max_calls,
+        ai_discovery_round_size=SETTINGS.scan.ai_discovery_round_size,
     )
     stored = db.get_setting("scan") or {}
     for key, value in stored.items():
@@ -161,7 +165,7 @@ async def collect_runtime_seeds(
         notes.extend(f"交互采集: {error}" for error in crawl.errors[:5])
         if not crawl.ok and not crawl.errors:
             notes.append("交互采集没有拿到页面")
-    else:
+    elif cfg.headless_render:
         for page in [base][: max(1, int(cfg.max_render_pages or 1))]:
             result = await render_page(page, timeout=max(10.0, cfg.timeout_seconds + 15),
                                        wait_ms=max(500, int(cfg.render_wait_ms or 4000)))
@@ -170,6 +174,20 @@ async def collect_runtime_seeds(
                 continue
             rendered_pages.append((page, result.dom))
             runtime_requests.extend(result.requests)
+
+    if cfg.ai_discovery:
+        from .ai_browser import ai_interactive_crawl
+        ai_crawl = await ai_interactive_crawl(base, cfg)
+        if ai_crawl.ok:
+            rendered_pages.extend(ai_crawl.pages)
+            runtime_requests.extend(ai_crawl.requests)
+            notes.append(
+                f"AI 探索完成: {ai_crawl.actions} 个动作, {ai_crawl.ai_calls} 次模型调用, "
+                f"{ai_crawl.no_effect} 个无变化动作, {len(ai_crawl.requests)} 个请求"
+            )
+        else:
+            notes.append("AI 探索未完成")
+        notes.extend(f"AI 探索: {error}" for error in ai_crawl.errors[:5])
 
     for page_url, dom in rendered_pages:
         for cand in extractor.from_html(page_url, dom, 0):
@@ -262,7 +280,7 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
 
         # 可选: 无头浏览器把页面真跑一遍, 补出"执行后才出现"的脚本与运行时接口地址
         runtime_seeds: list[Candidate] = []
-        if cfg.headless_render:
+        if cfg.headless_render or cfg.interactive_render or cfg.ai_discovery:
             runtime_seeds, runtime_notes = await collect_runtime_seeds(target, cfg, extractor)
             result.runtime_seeds = len(runtime_seeds)
             # 无头渲染只是"增强": 它失败说明没拿到运行时地址, 但静态采集该做的都做完了。

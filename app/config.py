@@ -55,6 +55,10 @@ class ScanConfig:
     render_wait_ms: int = 4000         # 渲染等待时间（虚拟时间预算）
     interactive_render: bool = False   # Playwright 同源路由/交互采集
     interactive_max_clicks: int = 3    # 每页最多切换几个 tab
+    ai_discovery: bool = False         # 确定性采集后，由 AI 规划安全浏览器动作
+    ai_discovery_max_actions: int = 12
+    ai_discovery_max_calls: int = 4
+    ai_discovery_round_size: int = 3
     # 带凭据采集（仅用于已授权目标）：额外请求头与 Cookie，
     # 用来覆盖"登录后才下发"的 JS；留空即匿名采集。
     extra_headers: dict[str, str] = field(default_factory=dict)
