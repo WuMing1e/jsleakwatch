@@ -817,6 +817,45 @@ def test_http_error_on_entry_marks_scan_failed(prepared) -> None:
     assert Handler.requests == ["/"], "入口失败后不应继续并发配置探针"
 
 
+def test_html_response_for_js_url_is_not_stored_as_script(prepared) -> None:
+    """GitHub /blob 等源码网页即使 URL 以 .js 结尾，也不是 JS 资产。"""
+    _target, db = prepared
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path.startswith("/vendor/BlobBuilder.min.js"):
+                body = (b"<!doctype html><html><body>"
+                        b"uploadToken: 'MX99o3AK7cYZ6zGeAaWaJAdllj2cvFLbc7hwB5ouClzSGaB6JRZLwuYyaFwex3aEg8dLx0lXhiQUvfISaCQEww'"
+                        b"</body></html>")
+                ctype = "text/html"
+            else:
+                body = b'<html><script src="/vendor/BlobBuilder.min.js"></script></html>'
+                ctype = "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server, url = _serve(Handler)
+    fake_url = url + "vendor/BlobBuilder.min.js"
+    try:
+        target = _new_target(db, url)
+        result = _run(target)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.status == "ok", result.error
+    assert db.query_one("SELECT id FROM assets WHERE target_id=? AND url=?",
+                        (target["id"], fake_url)) is None
+    assert db.query_one("SELECT id FROM findings WHERE target_id=? AND asset_url=?",
+                        (target["id"], fake_url)) is None
+
+
 def test_external_scanner_discovered_js_is_ingested(
         prepared, monkeypatch) -> None:
     """JSHawk/JScanner2 发现的 JS 要回写资产库并走统一检测。"""

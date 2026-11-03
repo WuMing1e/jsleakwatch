@@ -35,6 +35,19 @@ from .verify import passive_verify
 from .target_scanners import enabled_target_scanners
 
 
+def _looks_like_html_document(content_type: str, text: str) -> bool:
+    """识别被误当成脚本下载的源码网页/GitHub 页面。"""
+    ctype = (content_type or "").lower()
+    if "html" not in ctype and "xhtml" not in ctype:
+        return False
+    head = (text or "").lstrip()[:1200].lower()
+    return head.startswith("<") or "<html" in head or "<!doctype html" in head
+
+
+def _has_script_suffix(url: str) -> bool:
+    return urlparse(url).path.lower().endswith((".js", ".mjs", ".cjs"))
+
+
 @dataclass
 class ScanResult:
     target_id: int
@@ -360,6 +373,16 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                         continue
                     if not resp.text:
                         continue
+                    if cand.kind in ("script", "map") and _looks_like_html_document(
+                            resp.content_type, resp.text):
+                        if cand.kind == "script" and not _has_script_suffix(cand.url):
+                            # 外部采集器可能把无扩展名 HTML 路由标成 script。
+                            # 按真实响应改判后继续解析页面。
+                            cand.kind = "html"
+                        else:
+                            # GitHub /blob 页面、仓库首页和 .js 路径回退页都是 HTML，
+                            # 不能作为 JS 资产扫描。
+                            continue
 
                     sha = hashlib.sha256(resp.text.encode("utf-8", "ignore")).hexdigest()
                     # 同一份内容只存一次、只扫一次。大量 SPA / 网关对任意路径都返回

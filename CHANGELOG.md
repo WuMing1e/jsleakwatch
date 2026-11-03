@@ -13,6 +13,8 @@ AI 辅助采集正式版本。确定性采集仍先运行，AI 只作为第二�
 - JSHawk / JScanner2 发现的 JS 清单回写统一资产库，并重新抓取、检测和参与 AI 复核。
 - 外部构建清单、CDN/网关日志覆盖差集：新增 API、站点编辑界面和 `tools/coverage.py --manifest`。
 - Katana JSON 接口统一按 `api` 资产落库。
+- 拒绝 `Content-Type: text/html/xhtml` 的伪 JS 地址，避免把 GitHub `blob`/仓库页面、
+  登录回退页和高熵页面令牌当成硬编码密钥。
 - 同域并发限制、外部扫描器进程组清理、失效扫描启动回收。
 
 ## 1.0.0
