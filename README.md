@@ -33,7 +33,7 @@
 
 ## 2. 快速开始
 
-> 当前版本 **2.1.3**，变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+> 当前版本 **2.1.4**，变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 **一键安装 + 启动**（推荐，首次会自动建 `.venv` 并装依赖，约 1 分钟）：
 
@@ -665,7 +665,7 @@ python3.10 tools/rules_quality.py --corpus demo --labels work/labels.jsonl \
 控制台「检测规则」页另有一张规则质量卡，用**真实命中 + AI 复核结果**给出每条规则的误报率与建议。
 
 ```bash
-python3.10 -m pytest tests -q          # 253 个用例
+python3.10 -m pytest tests -q          # 254 个用例
 python3.10 work/check_frontend.py      # 前端 data-act 与后端路由一致性自检
 ```
 

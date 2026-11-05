@@ -186,6 +186,39 @@ def test_cancel_target_drops_queued_scan() -> None:
     assert sched.cancel_target(999999) is False        # 不存在的站点不报错
 
 
+def test_reap_stale_running_scans(client) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from app import db
+    from app.scheduler import Scheduler
+
+    target = client.post("/api/targets", json={
+        "name": "硬超时回收站", "base_url": "http://stale-scan.test", "enabled": False,
+    }).json()
+    stale_at = (datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat(timespec="seconds")
+    fresh_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    stale_id = int(db.execute(
+        "INSERT INTO scans(target_id,started_at,status) VALUES(?,?,'running')",
+        (target["id"], stale_at),
+    ).lastrowid or 0)
+    fresh_id = int(db.execute(
+        "INSERT INTO scans(target_id,started_at,status) VALUES(?,?,'running')",
+        (target["id"], fresh_at),
+    ).lastrowid or 0)
+
+    sched = Scheduler()
+    sched.max_scan_seconds = 1800
+    sched.state.running[int(target["id"])] = stale_at
+    assert sched.reap_stale_scans() >= 1
+    stale = db.query_one("SELECT status,error FROM scans WHERE id=?", (stale_id,))
+    fresh = db.query_one("SELECT status FROM scans WHERE id=?", (fresh_id,))
+    assert stale["status"] == "failed" and "硬时限" in stale["error"]
+    assert fresh["status"] == "running"
+    assert int(target["id"]) not in sched.state.running
+    db.execute("DELETE FROM scans WHERE id IN (?,?)", (stale_id, fresh_id))
+    client.delete(f"/api/targets/{target['id']}")
+
+
 def test_scheduler_instance_lock_and_orphan_cleanup(client) -> None:
     """重启残留进程不能并存；上次留下的 running 扫描要自动收口。"""
     import tempfile

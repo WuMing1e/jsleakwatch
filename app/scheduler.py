@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,8 +73,12 @@ def close_orphaned_scans() -> int:
 
 
 def scheduler_config() -> dict[str, int]:
-    """站点级并行度与 tick 间隔: 上千站点时最需要调的两个数。"""
-    cfg = {"max_parallel_targets": MAX_PARALLEL_TARGETS, "tick_seconds": TICK_SECONDS}
+    """站点并发、tick 和扫描硬时限。"""
+    cfg = {
+        "max_parallel_targets": MAX_PARALLEL_TARGETS,
+        "tick_seconds": TICK_SECONDS,
+        "max_scan_seconds": max(60, int(os.getenv("JSLW_MAX_SCAN_SECONDS", "1800"))),
+    }
     for key, value in (db.get_setting("scheduler") or {}).items():
         if key in cfg and value is not None:
             cfg[key] = max(1, int(value))
@@ -85,6 +89,7 @@ def scheduler_config() -> dict[str, int]:
 class SchedulerState:
     running: dict[int, str] = field(default_factory=dict)   # target_id -> 开始时间
     tasks: dict[int, "asyncio.Task[None]"] = field(default_factory=dict)  # 便于取消在跑的扫描
+    cancel_reasons: dict[int, str] = field(default_factory=dict)
     queued: list[dict[str, Any]] = field(default_factory=list)
     last_tick: str = ""
     scans_completed: int = 0
@@ -99,6 +104,7 @@ class Scheduler:
         self._sem = asyncio.Semaphore(MAX_PARALLEL_TARGETS)
         self._workers_configured = 0
         self.tick_seconds = TICK_SECONDS
+        self.max_scan_seconds = 1800
         self._workers: list[asyncio.Task[None]] = []
         self._stop = asyncio.Event()
         self._notifier_instance: FeishuNotifier | None = None
@@ -123,12 +129,17 @@ class Scheduler:
         cfg = scheduler_config()
         parallel = cfg["max_parallel_targets"]
         self.tick_seconds = cfg["tick_seconds"]
+        self.max_scan_seconds = cfg["max_scan_seconds"]
         self._sem = asyncio.Semaphore(parallel)
         self._stop.clear()
         self._workers = [asyncio.create_task(self._worker(i)) for i in range(parallel)]
         self._workers_configured = parallel
         self._task = asyncio.create_task(self._loop())
-        db.log_event(f"调度器已启动: 站点并行 {parallel}, tick {self.tick_seconds}s", kind="scheduler")
+        db.log_event(
+            f"调度器已启动: 站点并行 {parallel}, tick {self.tick_seconds}s, "
+            f"扫描硬时限 {self.max_scan_seconds}s",
+            kind="scheduler",
+        )
 
     async def stop(self) -> None:
         self._stop.set()
@@ -155,6 +166,7 @@ class Scheduler:
 
     async def _tick(self) -> None:
         self.state.last_tick = db.utcnow()
+        self.reap_stale_scans()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         busy = set(self.state.running.keys()) | {t["id"] for t in self.state.queued}
         parallel = self._workers_configured or MAX_PARALLEL_TARGETS
@@ -191,9 +203,51 @@ class Scheduler:
         self.state.queued = [t for t in self.state.queued if int(t["id"]) != tid]
         task = self.state.tasks.get(tid)
         if task is not None and not task.done():
+            self.state.cancel_reasons[tid] = "扫描已取消(站点被删除)"
             task.cancel()
             return True
         return False
+
+    def reap_stale_scans(self) -> int:
+        """周期回收超过硬时限的 running 记录，避免丢失任务永久占用槽位。"""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=max(60, self.max_scan_seconds))
+        ).isoformat(timespec="seconds")
+        rows = db.query(
+            "SELECT id, target_id FROM scans WHERE status='running' AND started_at < ? "
+            "ORDER BY id",
+            (cutoff,),
+        )
+        if not rows:
+            return 0
+        now = db.utcnow()
+        for row in rows:
+            tid = int(row["target_id"])
+            task = self.state.tasks.get(tid)
+            if task is not None and not task.done():
+                self.state.cancel_reasons[tid] = (
+                    f"扫描超过硬时限 {self.max_scan_seconds}s，已由调度器取消"
+                )
+                task.cancel()
+            else:
+                # 任务对象已经丢失，调度状态里可能还残留 target_id。
+                self.state.running.pop(tid, None)
+            db.execute(
+                "UPDATE scans SET status='failed', finished_at=?, "
+                "error=CASE WHEN error='' THEN ? ELSE error || '; ' || ? END WHERE id=?",
+                (
+                    now,
+                    f"扫描超过硬时限 {self.max_scan_seconds}s，已由调度器回收",
+                    f"扫描超过硬时限 {self.max_scan_seconds}s，已由调度器回收",
+                    row["id"],
+                ),
+            )
+        db.log_event(
+            f"回收 {len(rows)} 条超过硬时限的扫描",
+            kind="scheduler",
+            level="warn",
+        )
+        return len(rows)
 
     # ------------------------------------------------------- 工作线程
     async def _worker(self, index: int) -> None:
@@ -218,10 +272,11 @@ class Scheduler:
                     }
                     await self._after_scan(target, result)
                 except asyncio.CancelledError:
+                    reason = self.state.cancel_reasons.get(tid, "扫描因服务停止而取消")
                     db.execute("UPDATE scans SET status='failed', error=?, finished_at=? "
                                "WHERE target_id=? AND status='running'",
-                               ("扫描已取消(站点被删除)", db.utcnow(), tid))
-                    db.log_event(f"扫描已取消: {target.get('name')}", kind="scan", level="warn",
+                               (reason, db.utcnow(), tid))
+                    db.log_event(f"{reason}: {target.get('name')}", kind="scan", level="warn",
                                  target_id=tid)
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -231,6 +286,7 @@ class Scheduler:
                     )
                 finally:
                     self.state.tasks.pop(tid, None)
+                    self.state.cancel_reasons.pop(tid, None)
                     self.state.running.pop(tid, None)
                     self._queue.task_done()
 

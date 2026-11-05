@@ -572,6 +572,12 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
         )["c"]
         result.status = "ok" if not errors else ("partial" if result.assets_fetched else "failed")
         result.error = "; ".join(errors[:5])
+    except asyncio.CancelledError:
+        # 站点删除、服务停止或调度器硬超时都会走到这里。先落 failed，
+        # 避免 result 默认的 "ok" 在 finally 中把中断扫描误写成成功。
+        result.status = "failed"
+        result.error = "扫描被取消或超过硬时限"
+        raise
     except Exception as exc:  # noqa: BLE001
         result.status = "failed"
         result.error = f"{type(exc).__name__}: {exc}"[:500]
