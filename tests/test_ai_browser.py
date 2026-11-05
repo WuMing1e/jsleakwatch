@@ -77,3 +77,27 @@ def test_ai_discovery_runs_after_deterministic_browser(monkeypatch) -> None:
     assert "https://t/js/auth.js" in urls
     assert "https://auth.test/sso.js" in urls
     assert any("AI 探索完成" in note for note in notes)
+
+
+def test_ai_discovery_skips_when_deterministic_browser_has_no_page(monkeypatch) -> None:
+    monkeypatch.setattr(runtime, "find_chrome", lambda: "/fake/chrome")
+
+    async def failed_deterministic(_base, _cfg):
+        from app.browser_crawl import InteractiveCrawlResult
+        return InteractiveCrawlResult(ok=False, errors=["HTTP 401"])
+
+    async def unexpected_ai(_base, _cfg):
+        raise AssertionError("确定性浏览器失败后不应再启动 AI 浏览器")
+
+    monkeypatch.setattr("app.browser_crawl.interactive_crawl", failed_deterministic)
+    monkeypatch.setattr(ai_browser, "ai_interactive_crawl", unexpected_ai)
+    cfg = ScanConfig(
+        headless_render=True, interactive_render=True, ai_discovery=True,
+        max_render_pages=1,
+    )
+    seeds, notes = asyncio.run(collect_runtime_seeds(
+        {"id": 1, "base_url": "https://t/"}, cfg,
+        Extractor(base_url="https://t/", scope="same-origin"),
+    ))
+    assert seeds == []
+    assert any("AI 探索跳过" in note for note in notes)

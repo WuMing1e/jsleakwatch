@@ -195,18 +195,22 @@ async def collect_runtime_seeds(
             runtime_requests.extend(result.requests)
 
     if cfg.ai_discovery:
-        from .ai_browser import ai_interactive_crawl
-        ai_crawl = await ai_interactive_crawl(base, cfg)
-        if ai_crawl.ok:
-            rendered_pages.extend(ai_crawl.pages)
-            runtime_requests.extend(ai_crawl.requests)
-            notes.append(
-                f"AI 探索完成: {ai_crawl.actions} 个动作, {ai_crawl.ai_calls} 次模型调用, "
-                f"{ai_crawl.no_effect} 个无变化动作, {len(ai_crawl.requests)} 个请求"
-            )
+        baseline_requested = bool(cfg.interactive_render or cfg.headless_render)
+        if baseline_requested and not rendered_pages:
+            notes.append("AI 探索跳过: 确定性浏览器没有拿到有效页面")
         else:
-            notes.append("AI 探索未完成")
-        notes.extend(f"AI 探索: {error}" for error in ai_crawl.errors[:5])
+            from .ai_browser import ai_interactive_crawl
+            ai_crawl = await ai_interactive_crawl(base, cfg)
+            if ai_crawl.ok:
+                rendered_pages.extend(ai_crawl.pages)
+                runtime_requests.extend(ai_crawl.requests)
+                notes.append(
+                    f"AI 探索完成: {ai_crawl.actions} 个动作, {ai_crawl.ai_calls} 次模型调用, "
+                    f"{ai_crawl.no_effect} 个无变化动作, {len(ai_crawl.requests)} 个请求"
+                )
+            else:
+                notes.append("AI 探索未完成")
+            notes.extend(f"AI 探索: {error}" for error in ai_crawl.errors[:5])
 
     for page_url, dom in rendered_pages:
         for cand in extractor.from_html(page_url, dom, 0):

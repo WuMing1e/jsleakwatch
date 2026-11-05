@@ -176,8 +176,18 @@ async def ai_interactive_crawl(base_url: str, cfg: ScanConfig) -> AIBrowserResul
                         result.requests.append(key)
 
                 root.on("request", _record)
-                await root.goto(base_url, wait_until="domcontentloaded",
-                                timeout=max(3000, int(cfg.timeout_seconds * 1000)))
+                response = await root.goto(
+                    base_url, wait_until="domcontentloaded",
+                    timeout=max(3000, int(cfg.timeout_seconds * 1000)),
+                )
+                if response is None or response.status >= 400:
+                    result.errors.append(
+                        f"入口不可用: HTTP {response.status if response else '?'}"
+                    )
+                    await root.close()
+                    await browser.close()
+                    result.duration_ms = int((time.monotonic() - started) * 1000)
+                    return result
                 await root.wait_for_timeout(max(500, int(cfg.render_wait_ms or 4000)))
                 await root.evaluate("window.scrollTo(0, Math.min(document.body.scrollHeight, 5000))")
                 await root.wait_for_timeout(700)
