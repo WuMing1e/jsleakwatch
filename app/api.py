@@ -993,15 +993,31 @@ def asset_history_endpoint(aid: int, limit: int = Query(12, ge=1, le=50)) -> dic
 
 
 @app.get("/api/scans")
-def list_scans(target_id: int | None = None, limit: int = Query(50, ge=1, le=500)) -> list[dict[str, Any]]:
+def list_scans(
+    target_id: int | None = None,
+    status: str = "",
+    limit: int = Query(50, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    statuses = [item.strip() for item in status.split(",") if item.strip()]
+    invalid = [item for item in statuses if item not in {"running", "ok", "partial", "failed"}]
+    if invalid:
+        raise HTTPException(400, f"无效扫描状态: {', '.join(invalid)}")
+
+    clauses: list[str] = []
+    params: list[Any] = []
     if target_id:
-        rows = db.query(
-            "SELECT s.*, t.name AS target_name FROM scans s LEFT JOIN targets t ON t.id=s.target_id "
-            "WHERE s.target_id=? ORDER BY s.id DESC LIMIT ?", (target_id, limit))
-    else:
-        rows = db.query(
-            "SELECT s.*, t.name AS target_name FROM scans s LEFT JOIN targets t ON t.id=s.target_id "
-            "ORDER BY s.id DESC LIMIT ?", (limit,))
+        clauses.append("s.target_id=?")
+        params.append(target_id)
+    if statuses:
+        clauses.append(f"s.status IN ({','.join('?' * len(statuses))})")
+        params.extend(statuses)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    rows = db.query(
+        "SELECT s.*, t.name AS target_name FROM scans s LEFT JOIN targets t ON t.id=s.target_id "
+        f"{where} ORDER BY s.id DESC LIMIT ?",
+        params,
+    )
     return [{k: row[k] for k in row.keys()} for row in rows]
 
 

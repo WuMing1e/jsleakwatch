@@ -516,5 +516,31 @@ def test_alerts_events_and_scans(client) -> None:
     assert client.get("/api/assets").status_code == 200
 
 
+def test_scan_status_filter(client) -> None:
+    from app import db
+
+    target = client.post("/api/targets", json={
+        "name": "扫描状态筛选站", "base_url": "http://scan-filter.test", "enabled": False,
+    }).json()
+    for status in ("running", "ok", "partial", "failed"):
+        db.execute(
+            "INSERT INTO scans(target_id, started_at, status) VALUES(?,?,?)",
+            (target["id"], db.utcnow(), status),
+        )
+
+    running = client.get("/api/scans", params={"status": "running", "limit": 50}).json()
+    assert running and all(item["status"] == "running" for item in running)
+
+    mixed = client.get("/api/scans", params={
+        "target_id": target["id"], "status": "running,failed", "limit": 50,
+    }).json()
+    assert {item["status"] for item in mixed} == {"running", "failed"}
+    assert all(item["target_id"] == target["id"] for item in mixed)
+
+    invalid = client.get("/api/scans", params={"status": "unknown"})
+    assert invalid.status_code == 400
+    assert "无效扫描状态" in invalid.json()["detail"]
+
+
 def test_scan_endpoint_rejects_unknown_target(client) -> None:
     assert client.post("/api/targets/999999/scan").status_code == 404

@@ -164,6 +164,10 @@ def main() -> int:
         assets = check("资产列表", "GET", "/api/assets?limit=5", shape={"total", "items"})
         check("变更流", "GET", "/api/changes?limit=5", shape={"total", "items"})
         check("扫描记录", "GET", "/api/scans?limit=5")
+        filtered_scans = check("扫描记录状态筛选", "GET", "/api/scans?status=running&limit=5")
+        expect(isinstance(filtered_scans, list) and
+               all(item.get("status") == "running" for item in filtered_scans),
+               "扫描状态筛选生效", str(filtered_scans)[:120])
         check("事件日志", "GET", "/api/events?limit=5")
         rules = check("规则列表", "GET", "/api/rules", shape={"items", "revision"})
         check("规则质量", "GET", "/api/rules/quality", shape={"items", "summary"})
