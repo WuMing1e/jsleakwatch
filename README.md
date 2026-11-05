@@ -33,7 +33,7 @@
 
 ## 2. 快速开始
 
-> 当前版本 **2.0.0**，变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+> 当前版本 **2.1.0**，变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 **一键安装 + 启动**（推荐，首次会自动建 `.venv` 并装依赖，约 1 分钟）：
 
@@ -94,6 +94,7 @@ sourcemap ─┘   (同域/深度/上限约束)     │ app/rules.py   │
 | 文件 | 职责 |
 | --- | --- |
 | `app/rules.py` | 规则表、占位符/代码路径过滤、熵计算、重叠消歧、拼接还原 |
+| `app/web_analysis.py` | Web 确定性预分析：字符数组 / Hex / Unicode / Base64 还原、可疑片段取样、同源跨文件上下文 |
 | `app/fetcher.py` | httpx 异步流式抓取：全局并发闸门、同域礼貌限速、二进制识别、连接类失败重试、可选大小上限 |
 | `app/runtime.py` | 无头浏览器采集：`--dump-dom` 拿执行后的 DOM、netlog 拿运行时请求；渲染全局串行（多实例会互相拖死） |
 | `app/discover.py` | 从 HTML / JS 中提取脚本、chunk、sourcemap、站内页面 |
@@ -135,7 +136,7 @@ sourcemap ─┘   (同域/深度/上限约束)     │ app/rules.py   │
 2. 占位符识别——`YOUR_API_KEY`、`changeme`、`process.env.X`、`${...}`、全同字符、`static/js/app.4f2a1b.js` 这类资源路径一律不报；
 3. 熵阈值——变量名像密钥但值是低随机度字符串时过滤；
 4. 重叠消歧——同一段文本被多条规则命中时按 (等级, 规则优先级) 只保留最有价值的一条，例如 `redis://user:pass@host` 只报「数据库连接串」而不重复报「URL 内嵌凭据」；
-5. 拼接还原——`"https://api.x/" + "?token=" + "..."` 这种规避写法会先把相邻字符串字面量拼起来再匹配；
+5. 确定性与编码还原——相邻字符串先拼接；`String.fromCharCode`、ASCII 数字数组、Hex/Unicode 转义和 Base64/URL 编码会由系统安全还原后再次过规则，不执行页面 JavaScript；
 6. Base64 碎片过滤——命中值前后紧邻的字符也都是 Base64 字符时，说明它是从一段密文中间"切"出来的（实测一个随机串被 JSHawk 当成 Okta token 报了严重），直接丢弃；正常写法两边是引号/等号/分号，不受影响；
 7. 人机校验页识别——入口返回阿里云 / Cloudflare / 腾讯云 WAF 的挑战页时整轮收工，不落资产、不扫内容（这类页面里的随机令牌长度常与 API Key 撞上）；
 8. 跨轮去重——指纹不变则不重复告警。
@@ -361,7 +362,8 @@ python3.10 tools/benchmark.py run --corpus demo --labels labels.jsonl \
    ② **再还原内容**：Base64 / Base64URL / Hex / URL 编码 / JWT 会先**自动预解码**，结果作为 `自动预还原` 一起送进 prompt；AES/SM4/RSA 这类真加密则由模型结合上下文判断——若同文件里同时存在密钥/IV，说明谁都能还原，按真凭证处理；找不到解密材料就判 `uncertain`，不允许靠"看起来随机"下结论；
    ③ **再给结论**：真凭证 / 误报 / 公开密钥 / 待确认。
    这是任何密钥扫描器最难的取舍点，也正是模型擅长的地方。**默认只发送掩码值与上下文，明文不出本机**；显式打开「复核时发送明文命中值」后，prompt 里会带上原文（`命中值(明文): ...`）和预解码结果，准确率更高，但明文会发到模型端点——建议只在公司内网算力上开。
-2. **语义补漏**：找出正则表达不出来的东西——Base64/十六进制还原的密钥、拼接拆分的凭据、硬编码的管理口令、固定鉴权头、绕过鉴权的后门逻辑。它产出的是**一等公民的发现**（`rule_id = ai:semantic`），复用同一套去重、状态流转与告警。默认关闭，且发送前会先把规则已命中的明文替换成 `[[REDACTED]]`。
+2. **语义补漏**：先用文件名和代码特征筛少量高价值脚本，再做确定性编码还原与同源跨文件引用分析。模型会收到敏感逻辑附近的片段、自动还原结果，以及当前脚本实际 import/require/引用到的配置、请求、鉴权或加密模块；它只依据明确变量名和调用链使用跨文件内容。最终找出 Base64/十六进制编码的密钥、拼接拆分的凭据、硬编码口令、固定鉴权头和后门逻辑，产出**一等公民的发现**（`rule_id = ai:semantic`），复用同一套去重、状态流转与告警。默认关闭，且发送前会先把规则已命中的明文替换成 `[[REDACTED]]`。
+   系统只做 Web 静态资产分析，不自动连接数据库、不探测内网、不列云存储桶，也不主动验证云凭证；这些动作会把被动监测变成主动攻击面。
 3. **规则生成**：把确认过的一条发现反向生成正则规则，校验通过后入库生效。这样 AI 的收获会沉淀成确定性规则，而不是变成一个永久的运行时依赖。
 
 ### 接入公司内网的 GLM（或任意 OpenAI 兼容端点）
@@ -663,7 +665,7 @@ python3.10 tools/rules_quality.py --corpus demo --labels work/labels.jsonl \
 控制台「检测规则」页另有一张规则质量卡，用**真实命中 + AI 复核结果**给出每条规则的误报率与建议。
 
 ```bash
-python3.10 -m pytest tests -q          # 194 个用例
+python3.10 -m pytest tests -q          # 246 个用例
 python3.10 work/check_frontend.py      # 前端 data-act 与后端路由一致性自检
 ```
 
@@ -673,6 +675,7 @@ python3.10 work/check_frontend.py      # 前端 data-act 与后端路由一致�
 - `tests/test_pipeline.py`：起本地样例站跑完整扫描——验证 chunk/sourcemap 采集、增量跳过、明文不入库、失效后复现、**标记误报后重扫不再入告警队列**、WAF 挑战页整站跳过、同内容资产去重、外部命中上下文按真实位置截取、Base64 碎片丢弃
 - `tests/test_notify.py`：飞书推送的过滤口径——误报/公开密钥/高误报来源不推、未复核暂缓、AI 不可用时失败开放、推送失败不标记已推送
 - `tests/test_ai.py`：用 httpx MockTransport 模拟 OpenAI 兼容端点——base_url 容错、`response_format`/`max_tokens` 回退、无鉴权模式、掩码不外发明文、缓存命中、预算封顶、语义补漏前的明文脱敏、规则生成校验（含掩码还原）、AI 阶段自动标记误报
+- `tests/test_web_analysis.py`：字符数组 / `String.fromCharCode` / Hex / Unicode / Base64 还原、可疑片段取样、同源跨文件引用筛选
 - `tests/test_analyzers.py`：用桩二进制验证 Katana JSONL 解析（去重/同源/方法过滤/二进制后缀过滤/失败降级）、CLI 分析器三种输出形态与字段映射、外部工具失败必须显式报错、评测打分（未标注不计入误报、独有命中归属、漏报清单、不可用分析器可见）
 
 ## 14. 运维工具
@@ -698,7 +701,7 @@ python3.10 tools/dedupe_assets.py --apply    # 执行（自动备份）
 python3.10 tools/coverage.py --target-id 123 --manifest ./cdn-js-urls.txt
 
 # 改完接口跑一遍冒烟
-python3.10 tools/api_smoke.py --base http://127.0.0.1:8787
+JSLW_BASE=http://127.0.0.1:8787 python3.10 tools/api_smoke.py
 ```
 
 关于 DNS 的两个实测教训，写进工具里了：系统解析器遇到不存在的域名要等满 5 秒，上千个名字就是二十分钟，改用 dnspython 直查后降到一分钟内；并发别开太大，一次轰几千个查询会被内网 DNS 限流，表现成"全都解析不出来"。

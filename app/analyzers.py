@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 
 from .config import ScanConfig
 from .discover import NON_PAGE_EXT, same_origin
-from . import db
+from . import db, web_analysis
 
 
 # ------------------------------------------------------------------ 数据契约
@@ -234,25 +234,30 @@ class BuiltinAnalyzer:
 
     def analyze_text(self, text: str, url: str, target_id: int = 0) -> list[RawHit]:
         hits: list[RawHit] = []
-        for det in self.detector.scan_text(text, target_id=target_id, asset_url=url, store_raw=True):
-            hits.append(RawHit(
-                rule_id=det.rule_id, severity=det.severity, raw=det.raw,
-                masked=det.masked, context=det.context, line=det.line_no, source=self.name,
-            ))
-        # 与线上扫描保持一致：拼接规避写法再跑一遍
         from .rules import CONCAT_RE, collapse_string_concat
+
+        variants = [text]
         if CONCAT_RE.search(text):
             collapsed = collapse_string_concat(text)
             if collapsed != text:
-                seen = {h.rule_id + h.raw for h in hits}
-                for det in self.detector.scan_text(collapsed, target_id=target_id,
-                                                   asset_url=url, store_raw=True):
-                    if det.rule_id + det.raw in seen:
-                        continue
-                    hits.append(RawHit(
-                        rule_id=det.rule_id, severity=det.severity, raw=det.raw,
-                        masked=det.masked, context=det.context, line=det.line_no, source=self.name,
-                    ))
+                variants.append(collapsed)
+        decoded = web_analysis.decoded_corpus(text)
+        if decoded:
+            variants.append(decoded)
+
+        seen: set[tuple[str, str]] = set()
+        for variant in variants:
+            for det in self.detector.scan_text(
+                variant, target_id=target_id, asset_url=url, store_raw=True,
+            ):
+                key = (det.rule_id, det.raw or det.sha256)
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(RawHit(
+                    rule_id=det.rule_id, severity=det.severity, raw=det.raw,
+                    masked=det.masked, context=det.context, line=det.line_no, source=self.name,
+                ))
         return hits
 
 

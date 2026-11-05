@@ -484,6 +484,26 @@ def test_detector_scans_whole_text_when_unlimited() -> None:
     assert any(f.rule_id == "aws-access-key-id" for f in findings), "文件尾部的命中不应被截掉"
 
 
+def test_scan_detects_encoded_secret_once_across_variants() -> None:
+    """同一把编码密钥即使同时以字符数组和 Base64 出现，也只落一条发现。"""
+    import base64
+
+    from app.scanner import _detect, build_detector
+
+    raw = "AKIA3XQ7ZP2LMN4KQ7DA"
+    char_codes = ",".join(str(ord(ch)) for ch in raw)
+    encoded = base64.b64encode(raw.encode()).decode()
+    source = (
+        f"const a=String.fromCharCode({char_codes});"
+        f'const b=atob("{encoded}");'
+    )
+    hits = _detect(build_detector(), source, target_id=1,
+                   url="https://encoded.test/app.js", store_raw=True)
+    aws = [hit for hit in hits if hit.rule_id == "aws-access-key-id"]
+    assert len(aws) == 1, [(hit.rule_id, hit.raw) for hit in hits]
+    assert aws[0].raw == raw
+
+
 def test_jshawk_scanner_runs_against_demo_site(demo_site) -> None:
     """真调一次 JSHawk(本机留有工具副本时才跑), 验证"调起脚本 → 读报告"这条链路。"""
     import asyncio

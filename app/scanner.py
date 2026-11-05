@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse
 
-from . import ai, asset_history, db, gating
+from . import ai, asset_history, db, gating, web_analysis
 from .config import SETTINGS, ScanConfig
 from .discover import Extractor, Candidate, config_probe_candidates
 from .fetcher import Fetcher
@@ -452,14 +452,27 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                         if (external_analyzers
                                 and len(analyzer_pool) < _analyzer_asset_budget(external_analyzers)):
                             analyzer_pool.append((cand.url, resp.text))
-                        if (ai_cfg.enabled and ai_cfg.semantic_scan
-                                and len(resp.text) <= max(int(ai_cfg.semantic_max_chars) * 3, 60_000)):
-                            semantic_pool.append((
-                                ai.suspicion_score(cand.url, resp.text),
-                                cand.url,
+                        if ai_cfg.enabled and ai_cfg.semantic_scan:
+                            score = ai.suspicion_score(cand.url, resp.text)
+                            analysis_text = web_analysis.semantic_excerpt(
                                 resp.text,
+                                max_chars=min(
+                                    max(int(ai_cfg.semantic_max_chars) * 3, 6000),
+                                    60_000,
+                                ),
+                            )
+                            semantic_pool.append((
+                                score,
+                                cand.url,
+                                analysis_text,
                                 [d.raw for d in asset_dets if d.raw],
                             ))
+                            # 大站可能有上千个脚本。语义阶段只保留按可疑度排序的少量候选，
+                            # 否则长驻原文会把内存和模型成本一起推高。
+                            pool_limit = max(20, int(ai_cfg.semantic_max_assets) * 8)
+                            if len(semantic_pool) > pool_limit:
+                                semantic_pool.sort(key=lambda item: item[0], reverse=True)
+                                del semantic_pool[pool_limit:]
 
                     # 展开下一层
                     if cand.kind in ("html", "config"):
@@ -517,10 +530,6 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                     _finding_payload(target_id, det, asset_url, reopened, finding_id,
                                      upgraded=upgraded))
 
-        semantic_ran = False
-        if ai_cfg.enabled:
-            semantic_ran = await _ai_phase(ai_cfg, target_id, result, semantic_pool, seen_keys)
-
         # 并联发现: 外部分析器只跑在"新增或内容变化"的资产上, 稳态开销接近零
         if external_analyzers and analyzer_pool:
             await _external_analyzer_phase(target_id, external_analyzers, analyzer_pool,
@@ -536,7 +545,10 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
         # AI 判定放在最后: 规则、逐资产分析器、整站扫描器的命中一起判, 口径统一
         semantic_ran = False
         if ai_cfg.enabled:
-            semantic_ran = await _ai_phase(ai_cfg, target_id, result, semantic_pool, seen_keys)
+            semantic_ran = await _ai_phase(
+                ai_cfg, target_id, result, semantic_pool, seen_keys,
+                asset_texts=context_texts,
+            )
 
         if result.assets_fetched > 0:
             result.resolved = _resolve_missing(target_id, seen_keys, include_ai=semantic_ran)
@@ -590,6 +602,11 @@ def _detect(detector: Detector, text: str, target_id: int, url: str, store_raw: 
             findings.extend(
                 detector.scan_text(collapsed, target_id=target_id, asset_url=url, store_raw=store_raw)
             )
+    decoded = web_analysis.decoded_corpus(text)
+    if decoded:
+        findings.extend(
+            detector.scan_text(decoded, target_id=target_id, asset_url=url, store_raw=store_raw)
+        )
     seen: set[str] = set()
     unique: list[Detection] = []
     for item in findings:
@@ -1272,6 +1289,7 @@ async def _ai_phase(
     result: ScanResult,
     semantic_pool: list[tuple[float, str, str, list[str]]],
     seen_keys: set[str],
+    asset_texts: dict[str, str] | None = None,
 ) -> bool:
     """新发现复核 + 语义补漏。返回语义扫描是否真正执行过。"""
     client = ai.AIClient(ai_cfg)
@@ -1302,12 +1320,36 @@ async def _ai_phase(
     semantic_ran = False
     if ai_cfg.semantic_scan and semantic_pool:
         ranked = sorted(semantic_pool, key=lambda item: item[0], reverse=True)
+        raw_values_by_url: dict[str, list[str]] = {}
+        for _score, pool_url, _pool_text, pool_raws in semantic_pool:
+            raw_values_by_url.setdefault(pool_url, []).extend(pool_raws)
+        all_known_raws = [
+            value
+            for values in raw_values_by_url.values()
+            for value in values
+            if value
+        ]
+        verified_context = {
+            candidate_url: candidate_text
+            for candidate_url, candidate_text in (asset_texts or {}).items()
+            if candidate_url in raw_values_by_url
+        }
         for _score, url, text, raws in ranked[: max(0, int(ai_cfg.semantic_max_assets))]:
             if not _can_call(client, ai_cfg):
                 summary["errors"].append("已达当日调用上限, 语义补漏中断")
                 break
             semantic_ran = True
-            for candidate in await ai.semantic_scan_text(client, text, url, redact=raws):
+            related = web_analysis.related_context(
+                url,
+                text,
+                verified_context,
+                max_files=2,
+                max_total_chars=min(8000, max(2000, int(ai_cfg.semantic_max_chars) // 2)),
+            )
+            candidates = await ai.semantic_scan_text(
+                client, text, url, redact=[*raws, *all_known_raws], related=related,
+            )
+            for candidate in candidates:
                 created, fingerprint, payload = _insert_ai_finding(target_id, url, candidate)
                 seen_keys.add(fingerprint)
                 if created:
@@ -1335,6 +1377,10 @@ def _insert_ai_finding(
     # AI 给出的是一段证据文本, 先尽力从中还原出"凭证本体":
     # 这样它就能与规则/外部分析器的结果按同一个值归并, 而不是重复报一条。
     secrets = _extract_secrets_from_evidence(evidence)
+    decoded_value = str(item.get("decoded_value", "") or "").strip()
+    if (8 <= len(decoded_value) <= 400 and decoded_value not in secrets
+            and (re.search(r"\d", decoded_value) or shannon_entropy(decoded_value) >= 3.5)):
+        secrets.insert(0, decoded_value)
     evidence_digest = hashlib.sha256(evidence.encode("utf-8", "ignore")).hexdigest()
     digest = (hashlib.sha256(secrets[0].encode("utf-8", "ignore")).hexdigest()
               if secrets else evidence_digest)
@@ -1460,6 +1506,8 @@ async def semantic_scan_target(target: dict[str, Any], limit: int = 5) -> dict[s
     store_raw = scan_config_from_settings().store_raw_secrets
     scanned = 0
     inserted: list[dict[str, Any]] = []
+    asset_texts: dict[str, str] = {}
+    raws_by_url: dict[str, list[str]] = {}
 
     if not rows:
         return {"ok": False, "error": "该站点还没有采集到资产, 请先执行一次扫描"}
@@ -1480,8 +1528,27 @@ async def semantic_scan_target(target: dict[str, Any], limit: int = 5) -> dict[s
                 _detect, detector, result.text, target_id, row["url"], store_raw
             )
             raws = [d.raw for d in detected if d.raw]
+            raws_by_url[row["url"]] = raws
             client = ai.AIClient(ai_cfg)
-            for candidate in await ai.semantic_scan_text(client, result.text, row["url"], redact=raws):
+            analysis_text = web_analysis.semantic_excerpt(
+                result.text, max_chars=max(1000, int(ai_cfg.semantic_max_chars)),
+            )
+            related = web_analysis.related_context(
+                row["url"], analysis_text,
+                {
+                    candidate_url: candidate_text
+                    for candidate_url, candidate_text in asset_texts.items()
+                    if candidate_url in raws_by_url
+                },
+                max_files=2,
+                max_total_chars=min(6000, max(1500, int(ai_cfg.semantic_max_chars) // 2)),
+            )
+            asset_texts[row["url"]] = analysis_text
+            all_known_raws = [value for values in raws_by_url.values() for value in values]
+            candidates = await ai.semantic_scan_text(
+                client, analysis_text, row["url"], redact=all_known_raws, related=related,
+            )
+            for candidate in candidates:
                 created, _fingerprint, payload = _insert_ai_finding(target_id, row["url"], candidate)
                 if created:
                     inserted.append(payload)

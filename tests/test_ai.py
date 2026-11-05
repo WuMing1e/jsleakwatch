@@ -184,11 +184,15 @@ def test_normalize_triage_clamps_and_aliases() -> None:
 def test_normalize_semantic_filters_short_evidence() -> None:
     items = ai.normalize_semantic([
         {"type": "a", "evidence": "short", "severity": "high"},
-        {"type": "b", "evidence": "admin_password = 'Sup3rS3cret!'", "severity": "胡说", "confidence": 9},
+        {"type": "b", "evidence": "admin_password = 'Sup3rS3cret!'", "severity": "胡说",
+         "confidence": 9, "decoded_value": "Sup3rS3cret!",
+         "related_files": ["https://x.test/config.js"]},
         "not a dict",
     ])
     assert len(items) == 1
     assert items[0]["severity"] == "medium" and items[0]["confidence"] == 1.0
+    assert items[0]["decoded_value"] == "Sup3rS3cret!"
+    assert items[0]["related_files"] == ["https://x.test/config.js"]
 
 
 # ------------------------------------------------------------ 复核任务
@@ -369,10 +373,84 @@ def test_semantic_scan_redacts_known_secrets_before_sending() -> None:
     assert items[0]["type"] == "硬编码口令"
 
 
+def test_semantic_prompt_includes_deterministic_decode_and_related_context() -> None:
+    captured = {}
+    raw = "AKIA3XQ7ZP2LMN4KQ7DA"
+    encoded = "String.fromCharCode(" + ",".join(str(ord(ch)) for ch in raw) + ")"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["content"] = json.loads(request.content)["messages"][-1]["content"]
+        return chat_response("[]")
+
+    client = ai.AIClient(cfg(), transport=make_transport(handler))
+    run(ai.semantic_scan_text(
+        client,
+        encoded,
+        "https://app.test/static/js/app.js",
+        related=(
+            '<related_file url="https://app.test/static/js/config.js" '
+            'reason="源码引用 config">\nconst ak = "[[REDACTED]]";\n</related_file>'
+        ),
+    ))
+    prompt = captured["content"]
+    assert "auto_decoded" in prompt
+    assert "String.fromCharCode" in prompt
+    assert raw in prompt
+    assert "related_file" in prompt
+    assert "config.js" in prompt
+    system = ai.SEMANTIC_SYSTEM
+    assert "跨文件变量" in system and "系统自动预还原" in system
+
+
+def test_semantic_prompt_redacts_known_secret_after_decoding() -> None:
+    captured = {}
+    raw = "AKIA3XQ7ZP2LMN4KQ7DA"
+    encoded = "String.fromCharCode(" + ",".join(str(ord(ch)) for ch in raw) + ")"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["content"] = json.loads(request.content)["messages"][-1]["content"]
+        return chat_response("[]")
+
+    client = ai.AIClient(cfg(), transport=make_transport(handler))
+    run(ai.semantic_scan_text(
+        client, encoded, "https://app.test/app.js", redact=[raw],
+    ))
+    assert raw not in captured["content"]
+    assert "[[REDACTED]]" in captured["content"]
+
+
+def test_semantic_accepts_only_deterministically_decoded_values() -> None:
+    raw = "AKIA3XQ7ZP2LMN4KQ7DA"
+    encoded = "String.fromCharCode(" + ",".join(str(ord(ch)) for ch in raw) + ")"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return chat_response(json.dumps([
+            {
+                "type": "云访问密钥", "evidence": f"String.fromCharCode(...) => {raw}",
+                "decoded_value": raw, "confidence": 0.95, "severity": "critical",
+                "reason": "确定性还原得到 AWS Access Key",
+            },
+            {
+                "type": "模型猜测值", "evidence": "const suspicious = String.fromCharCode(...);",
+                "decoded_value": "FAKE_VALUE_123456", "confidence": 0.8, "severity": "high",
+                "reason": "没有真实样例支撑",
+            },
+        ]))
+
+    client = ai.AIClient(cfg(), transport=make_transport(handler))
+    items = run(ai.semantic_scan_text(client, encoded, "https://app.test/app.js"))
+    assert items[0]["decoded_value"] == raw
+    assert items[1]["decoded_value"] == ""
+
+
 def test_suspicion_score_prefers_config_files() -> None:
     config_score = ai.suspicion_score("http://x/config.js", "var a=1; authorization; atob('x')")
     plain_score = ai.suspicion_score("http://x/vendor.js", "x" * 90000)
     assert config_score > plain_score
+    encoded_score = ai.suspicion_score(
+        "http://x/plain.js", "String.fromCharCode(65); accessKey; jdbc:; encrypt()"
+    )
+    assert encoded_score > plain_score
 
 
 # ------------------------------------------------------------ 规则生成
@@ -475,6 +553,54 @@ def test_ai_phase_triages_new_findings_and_marks_false_positives() -> None:
     assert row["status"] == "false_positive"
     assert row["ai_verdict"] == "fake" and row["ai_confidence"] == 0.95
     assert "占位符" in row["ai_reason"]
+
+
+def test_ai_phase_passes_verified_cross_file_context_to_semantic_scan() -> None:
+    from app import scanner
+
+    target_id = int(db.execute(
+        "INSERT INTO targets(name, base_url, created_at) VALUES(?,?,?)",
+        ("跨文件站点", "https://cross.test/", db.utcnow()),
+    ).lastrowid or 0)
+    app_url = "https://cross.test/static/js/app.js"
+    config_url = "https://cross.test/static/js/config.js"
+    app_text = 'import cfg from "./config"; const k=String.fromCharCode(65,75,73,65);'
+    assets = {
+        app_url: app_text,
+        config_url: 'export const clientSecret = "real-secret-value";',
+        "https://cross.test/static/js/vendor.js": 'const unrelated = "AKIA3XQ7ZP2LMN4KQ7DA";',
+    }
+    captured = {}
+
+    async def fake_semantic(client, text, url, redact=None, related=""):
+        captured.update({"text": text, "url": url, "redact": redact, "related": related})
+        return []
+
+    ai_cfg = cfg(semantic_scan=True, semantic_max_assets=1, semantic_max_chars=6000)
+    original_client, original_semantic = ai.AIClient, ai.semantic_scan_text
+    ai.AIClient = lambda c, transport=None: original_client(c)  # type: ignore[assignment]
+    ai.semantic_scan_text = fake_semantic  # type: ignore[assignment]
+    try:
+        result = scanner.ScanResult(target_id=target_id)
+        ran = asyncio.run(scanner._ai_phase(
+            ai_cfg,
+            target_id,
+            result,
+            semantic_pool=[
+                (20.0, app_url, app_text, []),
+                (10.0, config_url, assets[config_url], []),
+            ],
+            seen_keys=set(),
+            asset_texts=assets,
+        ))
+    finally:
+        ai.AIClient, ai.semantic_scan_text = original_client, original_semantic  # type: ignore[assignment]
+
+    assert ran is True
+    assert captured["url"] == app_url
+    assert "config.js" in captured["related"]
+    assert "real-secret-value" in captured["related"]
+    assert "vendor.js" not in captured["related"]
 
 
 def test_high_confidence_public_key_is_automatically_ignored() -> None:
