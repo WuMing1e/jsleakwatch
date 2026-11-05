@@ -805,8 +805,8 @@ def test_waf_challenge_page_is_skipped_entirely(prepared) -> None:
     assert db.query("SELECT id FROM findings WHERE target_id=?", (target["id"],)) == []
 
 
-def test_http_error_on_entry_marks_scan_failed(prepared) -> None:
-    """入口返回 5xx 时不能因为"没有异常字符串"就误显示成正常。"""
+def test_http_error_on_entry_marks_scan_failed(prepared, monkeypatch) -> None:
+    """入口 5xx 直接失败，也不能再启动昂贵的整站扫描器。"""
     _target, db = prepared
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -825,9 +825,24 @@ def test_http_error_on_entry_marks_scan_failed(prepared) -> None:
             pass
 
     server, url = _serve(Handler)
+    from app import scanner
+    from app.target_scanners import ScanRunResult
+    import asyncio
+    import importlib
+    importlib.reload(scanner)
+    calls: list[str] = []
+
+    class FailIfCalled:
+        name = "should-not-run"
+
+        async def scan(self, _target):
+            calls.append(self.name)
+            return ScanRunResult()
+
+    monkeypatch.setattr(scanner, "enabled_target_scanners", lambda: [FailIfCalled()])
     try:
         target = _new_target(db, url)
-        result = _run(target)
+        result = asyncio.run(scanner.scan_target(target))
     finally:
         server.shutdown()
         server.server_close()
@@ -835,6 +850,7 @@ def test_http_error_on_entry_marks_scan_failed(prepared) -> None:
     assert result.status == "failed"
     assert "HTTP 503" in result.error
     assert Handler.requests == ["/"], "入口失败后不应继续并发配置探针"
+    assert calls == [], "入口失败且零资产时不应执行整站扫描器"
 
 
 def test_html_response_for_js_url_is_not_stored_as_script(prepared) -> None:

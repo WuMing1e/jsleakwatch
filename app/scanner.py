@@ -327,6 +327,7 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
             max_depth = min(int(target.get("max_depth") or cfg.max_depth), 4)
             fetched = 0
             entry_challenge = ""        # 入口就是人机校验页 -> 整站没得扫, 直接收工
+            entry_failure = ""          # 入口网络/HTTP 失败且零资产 -> 不跑昂贵的整站扫描器
             seen_content: dict[str, str] = {}   # 内容哈希 -> 第一次见到它的地址
             stop_scan = False
             # 留一份有上限的原文, 只为了给外部工具的命中截取真实上下文
@@ -370,6 +371,7 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                         if failure != "binary" and not optional_miss and len(errors) < 25:
                             errors.append(f"{cand.url}: {failure}")
                         if cand.url == target["base_url"]:
+                            entry_failure = failure
                             stop_scan = True
                         continue
                     # 人机校验页不是站点自己的内容: 存下来会变成一堆假资产,
@@ -516,6 +518,17 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
                          kind="scan", level="warn", target_id=target_id)
             result.status = "failed"
             result.error = "; ".join(errors[:5])
+            return result
+
+        if entry_failure and result.assets_fetched == 0:
+            # 入口的连接/TLS/HTTP 已经失败，整站扫描器只会用同一目标再超时一次。
+            # 不可达站点会被调度器退避重试，不值得占用并行槽位等 JSHawk/JScanner2 超时。
+            db.log_event(
+                f"跳过外部分析: 入口请求失败且没有取得资产 ({entry_failure[:120]})",
+                kind="scan", level="warn", target_id=target_id,
+            )
+            result.status = "failed"
+            result.error = "; ".join(errors[:5]) or f"入口请求失败: {entry_failure}"[:500]
             return result
 
         # ---- 落库比对
