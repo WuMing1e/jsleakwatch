@@ -1,5 +1,15 @@
 # 变更日志
 
+## 2.1.2
+
+### 新增
+
+- 持续巡检自动化接入 GitHub Issue：发现可复现代码缺陷时先建单，再修复；
+  同名 open Issue 自动复用，避免每轮重复创建。
+- `tools/github_issue.py` 使用本机 Git 凭据或 `GITHUB_TOKEN` 调用 GitHub REST API，
+  只输出 Issue 编号与 URL，不打印认证令牌。
+- 修复提交正文使用 `Fixes #编号`，合并到默认分支后由 GitHub 自动关闭 Issue。
+
 ## 2.1.1
 
 ### 修复

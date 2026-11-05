@@ -33,7 +33,7 @@
 
 ## 2. 快速开始
 
-> 当前版本 **2.1.1**，变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+> 当前版本 **2.1.2**，变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 **一键安装 + 启动**（推荐，首次会自动建 `.venv` 并装依赖，约 1 分钟）：
 
@@ -665,7 +665,7 @@ python3.10 tools/rules_quality.py --corpus demo --labels work/labels.jsonl \
 控制台「检测规则」页另有一张规则质量卡，用**真实命中 + AI 复核结果**给出每条规则的误报率与建议。
 
 ```bash
-python3.10 -m pytest tests -q          # 247 个用例
+python3.10 -m pytest tests -q          # 253 个用例
 python3.10 work/check_frontend.py      # 前端 data-act 与后端路由一致性自检
 ```
 
@@ -685,6 +685,7 @@ python3.10 work/check_frontend.py      # 前端 data-act 与后端路由一致�
 | `tools/asset_recon.py` | **公网资产收集**：证书透明度日志（crt.sh）+ urlscan.io + hackertarget + rapiddns + 本系统已监测站点，再用「已知业务词 + 环境后缀」定向扩展，DNS 解析、逐个探活，导出 CSV / Markdown / 可导入清单。只做 DNS 与单次 GET，不做端口扫描 |
 | `tools/dedupe_assets.py` | **重复资产清理**：同一站点里内容完全相同的资产只留最早一条，发现能合并就合并。默认只预演，`--apply` 才写库（写前自动备份到 `data/backup/`） |
 | `tools/api_smoke.py` | **全接口冒烟**：把控制台所有接口跑一遍并断言返回结构，改完接口先跑它 |
+| `tools/github_issue.py` | **巡检 Issue 自动化**：从 Git 凭据读取令牌，按标题去重后创建 GitHub Issue，不输出凭证 |
 | `tools/coverage.py` | **覆盖率报告**：回答"某站点里 manifest 声明的 JS 是否都采到了"，并区分真缺口与多余候选 |
 | `tools/benchmark.py` / `tools/compare_scanners.py` | 冻结语料、人工标注、多分析器打分与横向对比 |
 
@@ -702,6 +703,12 @@ python3.10 tools/coverage.py --target-id 123 --manifest ./cdn-js-urls.txt
 
 # 改完接口跑一遍冒烟
 JSLW_BASE=http://127.0.0.1:8787 python3.10 tools/api_smoke.py
+
+# 自动巡检发现缺陷时先建单（同名 open Issue 会复用，不会重复创建）
+python3.10 tools/github_issue.py ensure \
+  --title "[自动巡检] 扫描状态过滤失效" \
+  --body-file /tmp/jslw-issue.md \
+  --label bug
 ```
 
 关于 DNS 的两个实测教训，写进工具里了：系统解析器遇到不存在的域名要等满 5 秒，上千个名字就是二十分钟，改用 dnspython 直查后降到一分钟内；并发别开太大，一次轰几千个查询会被内网 DNS 限流，表现成"全都解析不出来"。
