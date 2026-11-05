@@ -2083,6 +2083,7 @@ async function renderSettings() {
           <div style="display:flex;flex-direction:column;gap:9px;border-top:1px solid var(--line-soft);padding-top:12px">
             <label class="switch"><input type="checkbox" id="ai-verify" ${ai.verify_new_findings ? 'checked' : ''}><span class="track"></span>扫描后自动复核新发现</label>
             <label class="switch"><input type="checkbox" id="ai-auto-fp" ${ai.auto_mark_false_positive ? 'checked' : ''}><span class="track"></span>高置信度误报自动标记为「误报」</label>
+            <label class="switch"><input type="checkbox" id="ai-auto-public" ${ai.auto_mark_public ? 'checked' : ''}><span class="track"></span>高置信度公开密钥自动转为「忽略」</label>
             <label class="switch"><input type="checkbox" id="ai-semantic" ${ai.semantic_scan ? 'checked' : ''}><span class="track"></span>开启语义补漏 (会把资产内容发给模型)</label>
             <label class="switch"><input type="checkbox" id="ai-raw" ${ai.send_raw ? 'checked' : ''}><span class="track"></span>复核时发送明文命中值（默认只发掩码）</label>
           </div>
@@ -2094,6 +2095,9 @@ async function renderSettings() {
           <div class="form-row-3">
             <label class="field">误报自动标记阈值
               <input type="number" id="ai-fpconf" min="0.5" max="1" step="0.05" value="${esc(ai.auto_fp_confidence)}">
+            </label>
+            <label class="field">公开密钥忽略阈值
+              <input type="number" id="ai-publicconf" min="0.5" max="1" step="0.05" value="${esc(ai.auto_public_confidence)}">
             </label>
             <label class="field">单轮复核上限
               <input type="number" id="ai-perscan" min="0" max="200" value="${esc(ai.max_calls_per_scan)}">
@@ -2367,9 +2371,11 @@ function readAIFields() {
     model: $('#ai-model').value.trim(),
     verify_new_findings: $('#ai-verify').checked,
     auto_mark_false_positive: $('#ai-auto-fp').checked,
+    auto_mark_public: $('#ai-auto-public').checked,
     semantic_scan: $('#ai-semantic').checked,
     send_raw: $('#ai-raw').checked,
     auto_fp_confidence: Number($('#ai-fpconf').value || 0.85),
+    auto_public_confidence: Number($('#ai-publicconf').value || 0.9),
     max_calls_per_scan: Number($('#ai-perscan').value || 20),
     max_calls_per_day: Number($('#ai-perday').value || 500),
     semantic_max_assets: Number($('#ai-maxassets').value || 5),

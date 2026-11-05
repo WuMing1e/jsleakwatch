@@ -775,6 +775,12 @@ async def _apply_triage(client: "ai.AIClient", cfg: "ai.AIConfig",
             and verdict["confidence"] >= float(cfg.auto_fp_confidence)):
         status = "false_positive"
         marked_fp = True
+    elif (cfg.auto_mark_public and verdict["verdict"] == "public"
+          and verdict["confidence"] >= float(cfg.auto_public_confidence)
+          and status in ("new", "open")):
+        # 地图 Key、GA/Firebase Web Key、小程序 AppID 等公开标识不是待处理泄露。
+        # 保留记录与 AI 理由，只移出待处理队列。
+        status = "ignored"
     db.execute(
         "UPDATE findings SET ai_verdict=?, ai_confidence=?, ai_reason=?, ai_impact=?, "
         "ai_remediation=?, ai_model=?, ai_checked_at=?, status=? WHERE id=?",

@@ -477,6 +477,51 @@ def test_ai_phase_triages_new_findings_and_marks_false_positives() -> None:
     assert "占位符" in row["ai_reason"]
 
 
+def test_high_confidence_public_key_is_automatically_ignored() -> None:
+    from app import scanner
+
+    target_id = int(db.execute(
+        "INSERT INTO targets(name, base_url, created_at) VALUES(?,?,?)",
+        ("公开密钥站点", "http://public.test/", db.utcnow()),
+    ).lastrowid or 0)
+    fid = int(db.execute(
+        "INSERT INTO findings(target_id, rule_id, rule_name, severity, category, fingerprint, "
+        "match_masked, match_sha256, context, asset_url, first_seen_at, last_seen_at, status) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'new')",
+        (target_id, "google-api-key", "Google API Key", "high", "cloud",
+         "fp-public-" + db.utcnow(), "AIza...nsaM(len=39)", "sha-public",
+         "analytics key", "https://www.google-analytics.com/analytics.js",
+         db.utcnow(), db.utcnow()),
+    ).lastrowid or 0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return chat_response('{"verdict":"public","confidence":0.95,'
+                             '"reason":"Google Analytics 官方公开密钥",'
+                             '"impact":"无","remediation":"无需处理"}')
+
+    ai_cfg = cfg(auto_mark_public=True, auto_public_confidence=0.9,
+                 semantic_scan=False, max_calls_per_scan=5)
+    original_client = ai.AIClient
+    ai.AIClient = lambda c, transport=None: original_client(c, transport=make_transport(handler))  # type: ignore[assignment]
+    try:
+        result = scanner.ScanResult(target_id=target_id)
+        result.new_findings.append({
+            "id": fid, "target_id": target_id, "rule_id": "google-api-key",
+            "rule_name": "Google API Key", "severity": "high",
+            "masked": "AIza...nsaM(len=39)",
+            "asset_url": "https://www.google-analytics.com/analytics.js",
+            "context": "analytics key",
+        })
+        asyncio.run(scanner._ai_phase(ai_cfg, target_id, result,
+                                     semantic_pool=[], seen_keys=set()))
+    finally:
+        ai.AIClient = original_client  # type: ignore[assignment]
+
+    row = db.query_one("SELECT status,ai_verdict,ai_confidence FROM findings WHERE id=?", (fid,))
+    assert row["status"] == "ignored"
+    assert row["ai_verdict"] == "public" and row["ai_confidence"] == 0.95
+
+
 def test_triage_pending_judges_findings_left_over_by_the_per_scan_cap() -> None:
     """单轮上限之外的新发现, 推送前会被补判, 不该带着"未复核"发出去。"""
     from app import scanner

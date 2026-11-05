@@ -86,6 +86,8 @@ class AIConfig:
     verify_new_findings: bool = True     # 新发现自动复核
     auto_mark_false_positive: bool = False
     auto_fp_confidence: float = 0.85
+    auto_mark_public: bool = True        # 高置信度公开密钥自动转为忽略
+    auto_public_confidence: float = 0.9
     semantic_scan: bool = False          # 语义补漏 (会把资产内容发给模型)
     semantic_max_assets: int = 5
     semantic_max_chars: int = 12000
