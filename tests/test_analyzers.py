@@ -372,6 +372,7 @@ def test_jscanner2_discovered_js_urls_are_importable(tmp_path: Path) -> None:
         ("https://site.test/js/app.js", "secret-value-2", "ctx", "Med", "other", ""),
         ("https://site.test/api/config", "secret-value-3", "ctx", "Med", "other", ""),
         ("https://other.test/js/x.js", "secret-value-4", "ctx", "Med", "other", ""),
+        ("https://github.com/demo/repo/blob/main/x.js", "secret-value-5", "ctx", "Med", "other", ""),
     ])
     assert read_jscanner2_urls(db_file, host="site.test") == [
         "https://site.test/js/app.js",
@@ -483,7 +484,8 @@ def test_jshawk_reader_is_safe_on_missing_or_broken_report(tmp_path: Path) -> No
     discovered.write_text(
         "https://site.test/js/a.js\n"
         "https://site.test/js/a.js\n"
-        "https://other.test/js/b.js\n",
+        "https://other.test/js/b.js\n"
+        "https://github.com/demo/repo/blob/main/c.js\n",
         encoding="utf-8",
     )
     assert read_jshawk_discovered_urls(discovered, host="site.test") == [

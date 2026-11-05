@@ -48,6 +48,12 @@ def _has_script_suffix(url: str) -> bool:
     return urlparse(url).path.lower().endswith((".js", ".mjs", ".cjs"))
 
 
+def _is_source_page_url(url: str) -> bool:
+    """GitHub 仓库/blob/commits 是源码网页，不是站点运行时的 JS 资产。"""
+    parsed = urlparse(url)
+    return parsed.netloc.lower() in {"github.com", "www.github.com"}
+
+
 @dataclass
 class ScanResult:
     target_id: int
@@ -1090,6 +1096,9 @@ async def _target_scanner_phase(
         result.discovered_js_urls.update(run.discovered_urls)
         for hit in run.hits:
             asset_url = getattr(hit, "url", "") or target["base_url"]
+            if _is_source_page_url(asset_url):
+                info["fragments"] += 1
+                continue
             # 外部工具给的"上下文"未必在命中位置: JSHawk 给的是文件开头 200 字符,
             # 展示出来只会让人更糊涂。能从原文里定位就用真正的前后文替换。
             text = (context_texts or {}).get(asset_url, "")
@@ -1152,7 +1161,7 @@ async def _ingest_discovered_js(
     frontier = [
         Candidate(url=url, kind="script", depth=0, label="外部工具发现")
         for url in sorted(result.discovered_js_urls)
-        if extractor.accepts(url, "script")
+        if extractor.accepts(url, "script") and not _is_source_page_url(url)
     ]
     visited: set[str] = set()
     content_seen: set[str] = set()
@@ -1173,6 +1182,8 @@ async def _ingest_discovered_js(
                     result.assets_failed += 1
                     continue
                 if not resp.text:
+                    continue
+                if _looks_like_html_document(resp.content_type, resp.text):
                     continue
                 sha = hashlib.sha256(resp.text.encode("utf-8", "ignore")).hexdigest()
                 if sha in content_seen:

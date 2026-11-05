@@ -181,6 +181,7 @@ def read_jscanner2_urls(db_path: str | Path, host: str = "", min_id: int = 0) ->
         for row in rows
         if str(row[0]).strip().startswith(("http://", "https://"))
         and urlparse(str(row[0])).path.lower().endswith((".js", ".mjs", ".cjs"))
+        and urlparse(str(row[0])).netloc.lower() not in ("github.com", "www.github.com")
     })
 
 
@@ -340,6 +341,8 @@ def read_jshawk_discovered_urls(path: str | Path, host: str = "") -> list[str]:
             continue
         parsed = urlparse(url)
         if not parsed.path.lower().endswith((".js", ".mjs", ".cjs")):
+            continue
+        if parsed.netloc.lower() in ("github.com", "www.github.com"):
             continue
         if host and parsed.netloc.lower() not in host and host not in parsed.netloc.lower():
             continue

@@ -873,6 +873,9 @@ def test_external_scanner_discovered_js_is_ingested(
             elif self.path.startswith("/external.js"):
                 body = b'var aws = "AKIA3XQ7ZP2LMN4KQ7DA";'
                 ctype = "application/javascript"
+            elif self.path.startswith("/html-fake.js"):
+                body = b"<!doctype html><html>uploadToken: fake-value</html>"
+                ctype = "text/html"
             else:
                 body = b'<html><script src="/app.js"></script></html>'
                 ctype = "text/html"
@@ -887,12 +890,14 @@ def test_external_scanner_discovered_js_is_ingested(
 
     server, url = _serve(Handler)
     external_url = url + "external.js"
+    html_fake_url = url + "html-fake.js"
+    github_url = "https://github.com/demo/repo/blob/main/fake.js"
 
     class FakeScanner:
         name = "fake-discovery"
 
         async def scan(self, _target):
-            return ScanRunResult(discovered_urls=[external_url])
+            return ScanRunResult(discovered_urls=[external_url, html_fake_url, github_url])
 
     monkeypatch.setattr(scanner, "enabled_target_scanners", lambda: [FakeScanner()])
     try:
@@ -907,6 +912,10 @@ def test_external_scanner_discovered_js_is_ingested(
                         (target["id"], external_url)) is not None
     assert db.query_one("SELECT id FROM findings WHERE target_id=? AND rule_id=?",
                         (target["id"], "aws-access-key-id")) is not None
+    assert db.query_one("SELECT id FROM assets WHERE target_id=? AND url=?",
+                        (target["id"], html_fake_url)) is None
+    assert db.query_one("SELECT id FROM assets WHERE target_id=? AND url=?",
+                        (target["id"], github_url)) is None
 
 
 def test_identical_content_is_stored_only_once(prepared) -> None:
