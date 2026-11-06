@@ -23,8 +23,18 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS projects (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS targets (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id           INTEGER REFERENCES projects(id) ON DELETE SET NULL,
     name                 TEXT NOT NULL,
     base_url             TEXT NOT NULL,
     enabled              INTEGER NOT NULL DEFAULT 1,
@@ -216,7 +226,10 @@ MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "assets": [("kind", "TEXT NOT NULL DEFAULT 'script'"),
                ("revision", "INTEGER NOT NULL DEFAULT 0"),
                ("recheck", "INTEGER NOT NULL DEFAULT 0")],
-    "targets": [("tags", "TEXT NOT NULL DEFAULT ''")],
+    "targets": [
+        ("tags", "TEXT NOT NULL DEFAULT ''"),
+        ("project_id", "INTEGER REFERENCES projects(id) ON DELETE SET NULL"),
+    ],
     "findings": [
         ("verified", "TEXT NOT NULL DEFAULT 'unverified'"),
         ("origin", "TEXT NOT NULL DEFAULT 'rule'"),
@@ -240,6 +253,33 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for name, ddl in columns:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+    # 项目目录是后加的: 老库升级后把已有站点全部归入默认项目。
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_targets_project ON targets(project_id)")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute(
+        "INSERT OR IGNORE INTO projects(name,description,is_default,created_at,updated_at) "
+        "VALUES(?,?,1,?,?)",
+        ("默认项目", "系统迁移时自动创建，用于存放未分类的监测站点", now, now),
+    )
+    default_project = conn.execute(
+        "SELECT id FROM projects WHERE is_default=1 ORDER BY id LIMIT 1"
+    ).fetchone()
+    if default_project is None:
+        default_project = conn.execute(
+            "SELECT id FROM projects ORDER BY id LIMIT 1"
+        ).fetchone()
+        if default_project is not None:
+            conn.execute(
+                "UPDATE projects SET is_default=1, updated_at=? WHERE id=?",
+                (now, default_project[0]),
+            )
+    if default_project is not None:
+        conn.execute(
+            "UPDATE targets SET project_id=? "
+            "WHERE project_id IS NULL OR project_id NOT IN (SELECT id FROM projects)",
+            (default_project[0],),
+        )
 
 
 def query(sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:

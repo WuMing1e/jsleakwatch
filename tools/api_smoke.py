@@ -122,7 +122,7 @@ def main() -> int:
     args = parser.parse_args()
 
     site, server = serve_fixture()
-    created_target = created_rule = created_finding = None
+    created_target = created_rule = created_finding = created_project = None
     saved_analyzers = saved_ai = saved_scan = None
     print(f"目标服务 {BASE} · 样例站点 {site}\n")
     try:
@@ -155,6 +155,7 @@ def main() -> int:
         check("概览分页参数", "GET", "/api/overview?recent_limit=3&targets_limit=2",
               shape={"kpis", "recent", "targets"})
         targets = check("站点列表", "GET", "/api/targets?limit=5", shape={"total", "items"})
+        check("项目目录列表", "GET", "/api/projects", shape={"total", "items"})
         check("站点筛选", "GET", "/api/targets?q=%E6%A0%B7%E4%BE%8B%E7%AB%99")
         findings = check("发现列表", "GET", "/api/findings?limit=5", shape={"total", "items"})
         check("发现按等级筛选", "GET", "/api/findings?severity=critical,high&limit=5")
@@ -219,8 +220,13 @@ def main() -> int:
         check("删除导入规则", "DELETE", "/api/rules/custom/gl:smoke-import")
 
         # ---------------- 站点 CRUD + 扫描 ----------------
+        project = check("新增项目目录", "POST", "/api/projects",
+                        body={"name": f"smoke-project-{time.time_ns()}", "description": "冒烟测试"},
+                        expect=201)
+        created_project = project["id"]
         target = check("新增站点", "POST", "/api/targets",
                        body={"name": "smoke-临时站", "base_url": site,
+                             "project_id": created_project,
                              "interval_minutes": 1440, "max_assets": 100}, expect=201)
         tid = target["id"]
         created_target = tid
@@ -335,6 +341,8 @@ def main() -> int:
             call("DELETE", f"/api/rules/custom/{created_rule}")
         if created_target and not args.keep:
             call("DELETE", f"/api/targets/{created_target}")
+        if created_project and not args.keep:
+            call("DELETE", f"/api/projects/{created_project}")
         server.shutdown()
         server.server_close()
 

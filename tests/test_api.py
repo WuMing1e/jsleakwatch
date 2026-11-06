@@ -65,6 +65,46 @@ def test_target_requires_valid_url(client) -> None:
     assert client.post("/api/targets", json={"base_url": "   "}).status_code == 400
 
 
+def test_project_directories_and_target_assignment(client) -> None:
+    projects = client.get("/api/projects").json()["items"]
+    default = next(item for item in projects if item["is_default"])
+    created_project = client.post("/api/projects", json={
+        "name": "客户项目 A", "description": "客户 A 的授权站点",
+    })
+    assert created_project.status_code == 201
+    project = created_project.json()
+
+    target = client.post("/api/targets", json={
+        "project_id": project["id"], "name": "项目站点",
+        "base_url": "http://project-site.test", "enabled": False,
+    }).json()
+    assert target["project_id"] == project["id"]
+    imported = client.post("/api/targets/import", json={
+        "project_id": project["id"], "text": "project-import.test",
+    }).json()
+    imported_target = imported["items"][0]
+
+    filtered = client.get("/api/targets", params={
+        "project_id": project["id"], "limit": 50,
+    }).json()
+    assert filtered["total"] == 2
+    assert all(item["project_name"] == "客户项目 A" for item in filtered["items"])
+    assert client.delete(f"/api/projects/{project['id']}").status_code == 400
+
+    moved = client.post("/api/targets/bulk", json={
+        "ids": [target["id"], imported_target["id"]], "action": "move",
+        "project_id": default["id"],
+    })
+    assert moved.status_code == 200 and moved.json()["affected"] == 2
+    assert client.delete(f"/api/projects/{project['id']}").status_code == 200
+
+    recreated = client.post("/api/projects", json={"name": "客户项目 A"})
+    assert recreated.status_code == 201
+    assert client.delete(f"/api/projects/{recreated.json()['id']}").status_code == 200
+    assert client.delete(f"/api/targets/{target['id']}").status_code == 200
+    assert client.delete(f"/api/targets/{imported_target['id']}").status_code == 200
+
+
 def _make_targets(client, count: int) -> list[int]:
     ids = []
     for index in range(count):
@@ -393,7 +433,8 @@ def test_bulk_import_reports_failed_lines_without_aborting(client, monkeypatch) 
     real_execute = db.execute
 
     def flaky(sql, params=()):
-        if "INSERT INTO targets" in sql and params and str(params[1]).startswith("https://bad-"):
+        if ("INSERT INTO targets" in sql
+                and any(str(item).startswith("https://bad-") for item in params)):
             raise RuntimeError("database is locked")
         return real_execute(sql, params)
 

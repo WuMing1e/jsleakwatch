@@ -75,7 +75,7 @@ const NAV = [
 
 const TITLES = {
   overview: ['概览', '持续监测总览与最近变化'],
-  targets: ['监测站点', '按周期自动巡检的站点列表'],
+  targets: ['监测站点', '用项目目录组织站点，并按周期自动巡检'],
   findings: ['泄露发现', '命中的硬编码凭证与复核状态'],
   assets: ['JS 资产', '已采集的脚本/映射文件清单'],
   rules: ['检测规则', '内置规则开关与外部规则导入'],
@@ -269,6 +269,7 @@ const state = {
   filters: { severity: new Set(), status: 'new,open', target: '', target_q: '', rule: '', q: '', sort: 'recent', page: 0, ai: '', showGated: false },
   selected: new Set(),
   selectedTargets: new Set(),
+  targetsProject: null,
   bulkBusy: false,
   targetsBulkAll: false,      // 批量操作作用于"当前筛选下全部站点", 而非仅勾选的 id
   cache: {},
@@ -563,8 +564,17 @@ async function renderTargets() {
   const per = state.targetsPerPage || 25;
   const params = new URLSearchParams({ limit: String(per), offset: String(page * per) });
   if (keyword) params.set('q', keyword);
-  const data = await api('/api/targets?' + params);
+  if (state.targetsProject) params.set('project_id', String(state.targetsProject));
+  const [data, projectData] = await Promise.all([
+    api('/api/targets?' + params),
+    api('/api/projects'),
+  ]);
   const items = Array.isArray(data) ? data : (data.items || []);
+  const projects = Array.isArray(projectData) ? projectData : (projectData.items || []);
+  if (state.targetsProject && !projects.some((p) => Number(p.id) === Number(state.targetsProject))) {
+    state.targetsProject = null;
+    return renderTargets();
+  }
   const total = data.total != null ? data.total : items.length;
   // 删掉最后一页上的全部站点后, 当前页会越界: 不回到最后一页的话, 界面会显示
   // "还没有监测站点", 让人以为整批都没了(实测踩过)
@@ -574,11 +584,27 @@ async function renderTargets() {
     return renderTargets();
   }
   state.cache.targets = items;      // 编辑按钮要按 id 回查, 之前只有发现页缓存过
+  state.cache.projects = projects;
+  const activeProject = projects.find((p) => Number(p.id) === Number(state.targetsProject));
+  const allSites = projects.reduce((sum, p) => sum + Number(p.site_count || 0), 0);
   const view = $('#view');
   view.innerHTML = `
     <section class="card">
+      <div class="toolbar" style="align-items:flex-start;overflow-x:auto">
+        <button class="btn btn-sm ${!activeProject ? 'btn-primary' : ''}" data-act="target-project" data-id="">
+          ${icon('folder', 13)}全部项目 <span class="tag">${allSites}</span>
+        </button>
+        ${projects.map((p) => `
+          <div class="nowrap" style="display:flex;align-items:center;gap:3px">
+            <button class="btn btn-sm ${activeProject && Number(p.id) === Number(activeProject.id) ? 'btn-primary' : ''}" data-act="target-project" data-id="${p.id}" title="${esc(p.description || '')}">
+              ${icon('folder', 13)}${esc(p.name)} <span class="tag">${p.site_count}</span>
+            </button>
+            <button class="btn btn-icon btn-sm" title="编辑项目目录" data-act="edit-project" data-id="${p.id}">${icon('sliders', 13)}</button>
+          </div>`).join('')}
+        <button class="btn btn-sm btn-ghost" data-act="add-project">${icon('plus', 13)}新建项目</button>
+      </div>
       <div class="toolbar">
-        <span class="muted">共 ${total} 个站点${keyword ? `（筛选: ${esc(keyword)}）` : ''}</span>
+        <span class="muted">${activeProject ? `项目「${esc(activeProject.name)}」` : '全部项目'} · ${total} 个站点${keyword ? `（筛选: ${esc(keyword)}）` : ''}</span>
         <div class="search" style="width:200px">${icon('search')}
           <input type="text" id="t-q" placeholder="按名称 / 地址筛选" value="${esc(keyword)}">
         </div>
@@ -602,7 +628,7 @@ async function renderTargets() {
               <td class="shrink"><input type="checkbox" class="check" data-act="target-select" data-id="${t.id}" ${state.selectedTargets.has(t.id) ? 'checked' : ''}></td>
               <td>
                 <div style="display:flex;flex-direction:column;gap:2px">
-                  <span>${esc(t.name)}</span>
+                  <span>${esc(t.name)} <span class="tag">${icon('folder', 10)}${esc(t.project_name || '未分类')}</span></span>
                   <a class="muted mono" style="font-size:11px" href="${esc(t.base_url)}" target="_blank" rel="noreferrer">${esc(t.base_url)}</a>
                 </div>
               </td>
@@ -619,7 +645,7 @@ async function renderTargets() {
                 <button class="btn btn-icon btn-sm btn-danger" title="删除" data-act="del-target" data-id="${t.id}" data-name="${esc(t.name)}">${icon('trash', 13)}</button>
               </td>
             </tr>`).join('')}</tbody></table>`
-          : `<div class="empty">${icon('globe')}还没有监测站点。点击「新增站点」开始持续监测。</div>`}
+          : `<div class="empty">${icon('folder')}${activeProject ? `项目「${esc(activeProject.name)}」中还没有站点。` : '还没有监测站点。'}点击「新增站点」开始持续监测。</div>`}
       </div>
       ${items.length ? listPager('sites', page, total, items.length, per) : ''}
     </section>`;
@@ -634,6 +660,70 @@ async function renderTargets() {
       renderTargets();
     }, 300);
   };
+}
+
+function projectForm(project) {
+  const isEdit = !!project;
+  const data = project || { name: '', description: '', site_count: 0, is_default: 0 };
+  return `
+    <div class="modal-head">
+      <h2>${isEdit ? '编辑项目目录' : '新建项目目录'}</h2>
+      <button class="btn btn-ghost btn-icon btn-sm" data-act="close-modal">${icon('x', 14)}</button>
+    </div>
+    <div class="modal-body">
+      <label class="field">项目名称
+        <input type="text" id="project-name" maxlength="80" value="${esc(data.name)}" placeholder="例如：客户 A / 生产环境 / 车联网">
+      </label>
+      <label class="field">说明
+        <textarea id="project-description" rows="3" maxlength="500" placeholder="记录授权范围、负责人或项目用途">${esc(data.description || '')}</textarea>
+      </label>
+      <div class="field-hint">项目目录用于组织监测站点；删除前需要先移走目录中的 ${data.site_count || 0} 个站点。</div>
+    </div>
+    <div class="modal-foot">
+      ${isEdit && !data.is_default ? `<button class="btn btn-danger" data-act="delete-project" data-id="${data.id}">${icon('trash', 13)}删除目录</button>` : ''}
+      <div class="spacer"></div>
+      <button class="btn" data-act="close-modal">取消</button>
+      <button class="btn btn-primary" data-act="save-project" data-id="${isEdit ? data.id : ''}">${isEdit ? '保存' : '创建目录'}</button>
+    </div>`;
+}
+
+function openProjectModal(project) {
+  openModal(projectForm(project));
+  setTimeout(() => { const el = $('#project-name'); if (el) el.focus(); }, 30);
+}
+
+async function saveProject(id) {
+  const name = $('#project-name').value.trim();
+  if (!name) { toast('请填写项目名称', 'err'); return; }
+  const payload = { name, description: $('#project-description').value.trim() };
+  try {
+    const project = id
+      ? await api(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(payload) })
+      : await api('/api/projects', { method: 'POST', body: JSON.stringify(payload) });
+    state.targetsProject = Number(project.id);
+    state.targetsPage = 0;
+    clearTargetSelection();
+    closeModal();
+    toast(id ? '项目目录已更新' : '项目目录已创建', 'ok');
+    renderTargets();
+  } catch (err) {
+    toast('保存项目失败: ' + err.message, 'err');
+  }
+}
+
+async function deleteProject(id) {
+  const project = (state.cache.projects || []).find((p) => Number(p.id) === Number(id));
+  if (!project) return;
+  if (!window.confirm(`确认删除项目目录「${project.name}」？目录中的站点必须先移走。`)) return;
+  try {
+    await api(`/api/projects/${id}`, { method: 'DELETE' });
+    if (Number(state.targetsProject) === Number(id)) state.targetsProject = null;
+    closeModal();
+    toast('项目目录已删除', 'ok');
+    renderTargets();
+  } catch (err) {
+    toast('删除项目失败: ' + err.message, 'err');
+  }
 }
 
 /* 巡检周期: 库里统一存分钟, 界面按 分钟/小时/天/周 输入, 大周期默认落到天与周 */
@@ -714,6 +804,7 @@ function bulkBar(items, total) {
     <button class="btn btn-sm" data-act="targets-bulk" data-op="enable" ${disabled}>恢复监测</button>
     <button class="btn btn-sm" data-act="targets-bulk" data-op="disable" ${disabled}>暂停监测</button>
     <button class="btn btn-sm" data-act="targets-bulk" data-op="interval" ${disabled}>${icon('sliders', 13)}改周期</button>
+    <button class="btn btn-sm" data-act="targets-bulk" data-op="move" ${disabled}>${icon('folder', 13)}移动项目</button>
     <button class="btn btn-sm btn-danger" data-act="targets-bulk" data-op="delete" ${disabled}>${icon('trash', 13)}删除</button>
     <button class="btn btn-sm btn-ghost" data-act="targets-clear" ${disabled}>取消选择</button>
   </div>`;
@@ -731,10 +822,11 @@ async function runBulk(op, extra) {
     if (state.targetsBulkAll) {
       body.all_matching = true;
       body.q = state.targetsQuery || '';
+      if (state.targetsProject) body.project_filter_id = Number(state.targetsProject);
     }
     const r = await api('/api/targets/bulk', { method: 'POST', body: JSON.stringify(body) });
     const label = { scan: '已排入扫描队列', enable: '已恢复监测', disable: '已暂停监测',
-                    delete: '已删除', interval: '已更新巡检周期' }[op] || '已完成';
+                    delete: '已删除', interval: '已更新巡检周期', move: '已移动到新项目' }[op] || '已完成';
     toast(`${label} · ${r.affected} 个站点`, 'ok');
     if (op !== 'scan') clearTargetSelection();
   } catch (err) {
@@ -744,8 +836,30 @@ async function runBulk(op, extra) {
   renderTargets();
 }
 
+function openMoveProjectModal() {
+  const projects = state.cache.projects || [];
+  $('#modal').innerHTML = `
+    <div class="modal-head"><h2>移动站点到项目目录</h2>
+      <button class="btn btn-ghost btn-icon btn-sm" data-act="close-modal">${icon('x', 14)}</button></div>
+    <div class="modal-body">
+      <label class="field">目标项目
+        <select id="move-project-id">
+          ${projects.map((p) => `<option value="${p.id}"${Number(p.id) === Number(state.targetsProject) ? ' selected' : ''}>${esc(p.name)} · ${p.site_count} 个站点</option>`).join('')}
+        </select>
+      </label>
+      <div class="field-hint">将移动 ${state.targetsBulkAll ? '当前筛选下的全部' : `已选的 ${state.selectedTargets.size} 个`}站点，不改变扫描配置和历史结果。</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-act="close-modal">取消</button>
+      <button class="btn btn-primary" data-act="targets-move-save">确认移动</button>
+    </div>`;
+  $('#modal-scrim').hidden = false;
+}
+
 /* 批量新增站点: 粘贴域名清单或选一个 txt, 统一套用周期/深度/资产上限 */
 function openBulkAddModal() {
+  const projects = state.cache.projects || [];
+  const selectedProject = Number(state.targetsProject) || Number((projects.find((p) => p.is_default) || projects[0] || {}).id) || '';
   $('#modal').innerHTML = `
     <div class="modal-head">
       <h2>批量新增站点</h2>
@@ -761,6 +875,11 @@ function openBulkAddModal() {
         <button class="btn btn-sm" data-act="bulk-add-pick">${icon('folder', 13)}从 txt 文件读取</button>
         <span class="field-hint" id="bulk-file-name" style="margin-left:9px"></span>
       </div>
+      <label class="field">所属项目目录
+        <select id="bulk-project-id">
+          ${projects.map((p) => `<option value="${p.id}"${Number(p.id) === selectedProject ? ' selected' : ''}>${esc(p.name)} · ${p.site_count} 个站点</option>`).join('')}
+        </select>
+      </label>
       <div class="form-row-3">
         ${intervalField('bulk-add-interval', 1440, '巡检周期')}
         <label class="field">页面递归深度
@@ -820,6 +939,7 @@ async function runBulkAdd() {
       method: 'POST',
       body: JSON.stringify({
         text,
+        project_id: Number($('#bulk-project-id').value),
         interval_minutes: readInterval('bulk-add-interval'),
         max_depth: Number($('#bulk-add-depth').value || 1),
         max_assets: Number($('#bulk-add-assets').value || 60),
@@ -882,7 +1002,10 @@ function openIntervalModal() {
 
 function targetForm(t) {
   const isEdit = !!t;
-  const data = t || { name: '', base_url: '', interval_minutes: 1440, scope: 'same-origin', max_depth: 2, max_assets: 400, include_sourcemaps: 1, probe_common_config: 1, notes: '' };
+  const projects = state.cache.projects || [];
+  const data = t || { project_id: state.targetsProject || null, name: '', base_url: '', interval_minutes: 1440, scope: 'same-origin', max_depth: 2, max_assets: 400, include_sourcemaps: 1, probe_common_config: 1, notes: '' };
+  const selectedProject = Number(data.project_id) || Number(state.targetsProject)
+    || Number((projects.find((p) => p.is_default) || projects[0] || {}).id) || '';
   return `
     <div class="modal-head">
       <h2>${isEdit ? '编辑站点' : '新增监测站点'}</h2>
@@ -895,6 +1018,11 @@ function targetForm(t) {
       <label class="field">入口地址
         <input type="text" id="f-url" value="${esc(data.base_url)}" placeholder="https://example.com/">
         <span class="field-hint">会从该页面出发, 递归发现脚本、按需加载 chunk 与 sourcemap。</span>
+      </label>
+      <label class="field">所属项目目录
+        <select id="f-project">
+          ${projects.map((p) => `<option value="${p.id}"${Number(p.id) === selectedProject ? ' selected' : ''}>${esc(p.name)} · ${p.site_count} 个站点</option>`).join('')}
+        </select>
       </label>
       <div class="form-row">
         ${intervalField('f-interval', data.interval_minutes, '巡检周期',
@@ -954,6 +1082,7 @@ function openTargetModal(t) {
 
 async function saveTarget(id) {
   const payload = {
+    project_id: Number($('#f-project').value),
     name: $('#f-name').value.trim(),
     base_url: $('#f-url').value.trim(),
     interval_minutes: readInterval('f-interval'),
@@ -2470,7 +2599,8 @@ function renderNav() {
 function renderActions(path) {
   const actions = {
     overview: `<button class="btn btn-sm" data-act="refresh">${icon('refresh', 13)}刷新</button>`,
-    targets: `<button class="btn btn-primary btn-sm" data-act="add-target">${icon('plus', 13)}新增站点</button>`,
+    targets: `<button class="btn btn-sm" data-act="add-project">${icon('folder', 13)}新建项目</button>
+      <button class="btn btn-primary btn-sm" data-act="add-target">${icon('plus', 13)}新增站点</button>`,
     findings: `<button class="btn btn-sm" data-act="nav" data-to="settings">告警设置${icon('chevron', 12)}</button>`,
     assets: `<button class="btn btn-sm" data-act="nav" data-to="targets">站点管理${icon('chevron', 12)}</button>`,
     rules: `<button class="btn btn-sm" data-act="refresh">${icon('refresh', 13)}刷新</button>`,
@@ -2585,6 +2715,21 @@ async function handleAction(el, evt) {
   if (act === 'export') { window.location.href = '/api/findings/export.csv?status=' + encodeURIComponent(state.filters.status || 'new,open'); return; }
 
   if (act === 'add-target') return openTargetModal(null);
+  if (act === 'add-project') return openProjectModal(null);
+  if (act === 'edit-project') {
+    const project = (state.cache.projects || []).find((p) => Number(p.id) === Number(el.dataset.id));
+    if (project) return openProjectModal(project);
+    toast('没找到该项目，刷新页面后再试', 'err');
+    return;
+  }
+  if (act === 'save-project') return saveProject(el.dataset.id || null);
+  if (act === 'delete-project') return deleteProject(el.dataset.id);
+  if (act === 'target-project') {
+    state.targetsProject = el.dataset.id ? Number(el.dataset.id) : null;
+    state.targetsPage = 0;
+    clearTargetSelection();
+    return renderTargets();
+  }
   if (act === 'bulk-add-target') return openBulkAddModal();
   if (act === 'bulk-add-pick') return $('#bulk-file').click();
   if (act === 'bulk-add-save') return runBulkAdd();
@@ -2799,7 +2944,14 @@ async function handleAction(el, evt) {
   if (act === 'targets-bulk') {
     const op = el.dataset.op;
     if (op === 'interval') return openIntervalModal();
+    if (op === 'move') return openMoveProjectModal();
     return runBulk(op);
+  }
+  if (act === 'targets-move-save') {
+    const projectId = Number($('#move-project-id').value);
+    if (!projectId) { toast('请选择目标项目', 'err'); return; }
+    closeModal();
+    return runBulk('move', { project_id: projectId });
   }
   if (act === 'targets-bulk-save-interval') {
     const minutes = readInterval('bulk-interval');

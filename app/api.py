@@ -73,7 +73,18 @@ def invalidate_dash_cache() -> None:
 
 # ---------------------------------------------------------------- 模型
 
+class ProjectIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+
+
+class ProjectPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+
+
 class TargetIn(BaseModel):
+    project_id: int | None = None
     name: str = Field(default="", max_length=120)
     base_url: str
     interval_minutes: int = Field(default=360, ge=1, le=60 * 24 * 30)
@@ -88,6 +99,7 @@ class TargetIn(BaseModel):
 
 
 class TargetPatch(BaseModel):
+    project_id: int | None = None
     name: str | None = None
     base_url: str | None = None
     interval_minutes: int | None = Field(default=None, ge=1, le=60 * 24 * 30)
@@ -129,6 +141,7 @@ class AllowlistIn(BaseModel):
 
 
 class TargetImportIn(BaseModel):
+    project_id: int | None = None
     urls: list[str] = Field(default_factory=list)
     text: str = ""
     interval_minutes: int = Field(default=1440, ge=1, le=60 * 24 * 30)
@@ -141,8 +154,10 @@ class TargetImportIn(BaseModel):
 
 class TargetBulkIn(BaseModel):
     ids: list[int] = Field(default_factory=list)
-    action: str                      # enable | disable | delete | scan | interval
+    action: str                      # enable | disable | delete | scan | interval | move
     interval_minutes: int | None = Field(default=None, ge=1, le=60 * 24 * 30)
+    project_id: int | None = None
+    project_filter_id: int | None = None
     all_matching: bool = False       # True 时忽略 ids, 直接作用于当前筛选下的全部站点
     q: str = ""                      # 配合 all_matching 的筛选词
 
@@ -220,6 +235,24 @@ def _target_row(tid: int) -> dict[str, Any]:
     if row is None:
         raise HTTPException(404, "站点不存在")
     return {k: row[k] for k in row.keys()}
+
+
+def _project_row(project_id: int) -> dict[str, Any]:
+    row = db.query_one("SELECT * FROM projects WHERE id=?", (project_id,))
+    if row is None:
+        raise HTTPException(404, "项目目录不存在")
+    return {k: row[k] for k in row.keys()}
+
+
+def _resolve_project_id(project_id: int | None) -> int:
+    if project_id is not None:
+        return int(_project_row(int(project_id))["id"])
+    row = db.query_one(
+        "SELECT id FROM projects ORDER BY is_default DESC, id LIMIT 1"
+    )
+    if row is None:
+        raise HTTPException(500, "系统缺少默认项目目录")
+    return int(row["id"])
 
 
 # ---------------------------------------------------------------- 概览
@@ -387,6 +420,77 @@ def _overview_uncached(recent_limit: int = 10, recent_offset: int = 0,
     }
 
 
+# ---------------------------------------------------------------- 项目目录
+
+@app.get("/api/projects")
+def list_projects() -> dict[str, Any]:
+    rows = db.query(
+        "SELECT p.*, COUNT(t.id) AS site_count, "
+        "COALESCE(SUM(t.enabled), 0) AS enabled_count "
+        "FROM projects p LEFT JOIN targets t ON t.project_id=p.id "
+        "GROUP BY p.id ORDER BY p.is_default DESC, p.name COLLATE NOCASE"
+    )
+    return {"total": len(rows), "items": [{k: row[k] for k in row.keys()} for row in rows]}
+
+
+@app.post("/api/projects", status_code=201)
+def create_project(payload: ProjectIn) -> dict[str, Any]:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "项目名称不能为空")
+    if db.query_one("SELECT id FROM projects WHERE name=?", (name,)):
+        raise HTTPException(400, "项目目录名称已存在")
+    now = db.utcnow()
+    try:
+        project_id = int(db.execute(
+            "INSERT INTO projects(name,description,is_default,created_at,updated_at) "
+            "VALUES(?,?,0,?,?)",
+            (name, payload.description.strip(), now, now),
+        ).lastrowid or 0)
+    except Exception as exc:  # noqa: BLE001 - 唯一约束等统一转成 400
+        raise HTTPException(400, f"创建项目失败: {exc}") from exc
+    db.log_event(f"新增项目目录 {name}", kind="project")
+    return _project_row(project_id)
+
+
+@app.patch("/api/projects/{project_id}")
+def update_project(project_id: int, payload: ProjectPatch) -> dict[str, Any]:
+    project = _project_row(project_id)
+    updates = payload.model_dump(exclude_none=True)
+    if "name" in updates:
+        updates["name"] = str(updates["name"]).strip()
+        if not updates["name"]:
+            raise HTTPException(400, "项目名称不能为空")
+        duplicate = db.query_one(
+            "SELECT id FROM projects WHERE name=? AND id<>?", (updates["name"], project_id)
+        )
+        if duplicate:
+            raise HTTPException(400, "项目目录名称已存在")
+    if "description" in updates:
+        updates["description"] = str(updates["description"]).strip()
+    if updates:
+        updates["updated_at"] = db.utcnow()
+        sets = ", ".join(f"{key}=?" for key in updates)
+        db.execute(f"UPDATE projects SET {sets} WHERE id=?", (*updates.values(), project_id))
+    db.log_event(f"更新项目目录 {project['name']}", kind="project")
+    return _project_row(project_id)
+
+
+@app.delete("/api/projects/{project_id}")
+def delete_project(project_id: int) -> dict[str, Any]:
+    project = _project_row(project_id)
+    if project["is_default"]:
+        raise HTTPException(400, "默认项目不能删除")
+    count = db.query_one(
+        "SELECT COUNT(*) c FROM targets WHERE project_id=?", (project_id,)
+    )["c"]
+    if count:
+        raise HTTPException(400, f"项目目录中还有 {count} 个站点，请先移动或删除")
+    db.execute("DELETE FROM projects WHERE id=?", (project_id,))
+    db.log_event(f"删除项目目录 {project['name']}", kind="project")
+    return {"deleted": project_id}
+
+
 # ---------------------------------------------------------------- 站点
 
 def _target_dict(row: Any) -> dict[str, Any]:
@@ -419,22 +523,27 @@ def list_targets(
     limit: int = Query(default=0, ge=0, le=5000),
     offset: int = Query(default=0, ge=0),
     q: str = "",
+    project_id: int | None = None,
 ) -> dict[str, Any]:
-    return cached(f"targets:{limit}:{offset}:{q}", 3.0,
-                  lambda: _list_targets_uncached(limit, offset, q))
+    return cached(f"targets:{limit}:{offset}:{q}:{project_id or ''}", 3.0,
+                  lambda: _list_targets_uncached(limit, offset, q, project_id))
 
 
-def _list_targets_uncached(limit: int, offset: int, q: str) -> dict[str, Any]:
+def _list_targets_uncached(
+    limit: int, offset: int, q: str, project_id: int | None = None,
+) -> dict[str, Any]:
     # 子查询里的表要单独起别名, 否则门控片段里的 "f." 会指到外层 JOIN 的别名（实测报 no such column）
     gate_sql, gate_params = gating.exclusion("fi")
     gate_expr = (f"({gate_sql})" if gate_sql else "1")
     # 聚合与门控合并到一次扫描里: 避免"每个站点跑 2~3 个子查询"
     sql = f"""
     SELECT t.*,
+           p.name AS project_name,
            COALESCE(f.open_count, 0) AS open_count,
            COALESCE(f.new_count, 0)  AS new_count,
            COALESCE(a.asset_count, 0) AS asset_count
       FROM targets t
+      LEFT JOIN projects p ON p.id=t.project_id
       LEFT JOIN (
           SELECT fi.target_id,
                  SUM(CASE WHEN fi.status IN ('new','open') AND {gate_expr} THEN 1 ELSE 0 END) AS open_count,
@@ -446,19 +555,28 @@ def _list_targets_uncached(limit: int, offset: int, q: str) -> dict[str, Any]:
       ) a ON a.target_id = t.id
     """
     params: list[Any] = [*gate_params, *gate_params]
-    where = ""
+    conditions: list[str] = []
     count_params: list[Any] = []
     if q:
-        where = " WHERE t.name LIKE ? OR t.base_url LIKE ?"
-        params.extend([f"%{q}%", f"%{q}%"])
-        count_params.extend([f"%{q}%", f"%{q}%"])
+        conditions.append("(t.name LIKE ? OR t.base_url LIKE ? OR p.name LIKE ?)")
+        wanted = f"%{q}%"
+        params.extend([wanted, wanted, wanted])
+        count_params.extend([wanted, wanted, wanted])
+    if project_id is not None:
+        conditions.append("t.project_id=?")
+        params.append(int(project_id))
+        count_params.append(int(project_id))
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     sql += where + " ORDER BY open_count DESC, t.name COLLATE NOCASE"
     if limit:
         sql += " LIMIT ? OFFSET ?"
         params.extend([limit, offset])
     rows = db.query(sql, params)
     # 总数要跟筛选一致, 否则分页条和"选择全部 N 个"都会按全表算
-    total = db.query_one("SELECT COUNT(*) c FROM targets t" + where, count_params)["c"]
+    total = db.query_one(
+        "SELECT COUNT(*) c FROM targets t LEFT JOIN projects p ON p.id=t.project_id" + where,
+        count_params,
+    )["c"]
     return {"total": total, "items": [_target_dict(row) for row in rows],
             "limit": limit or total, "offset": offset}
 
@@ -468,12 +586,13 @@ def create_target(payload: TargetIn) -> dict[str, Any]:
     invalidate_dash_cache()
     url = _normalize_url(payload.base_url)
     name = payload.name.strip() or urlparse(url).netloc
+    project_id = _resolve_project_id(payload.project_id)
     now = db.utcnow()
     tid = db.execute(
-        "INSERT INTO targets(name, base_url, enabled, interval_minutes, scope, max_depth, max_assets, "
-        "include_sourcemaps, probe_common_config, tags, notes, created_at, next_scan_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (name, url, 1 if payload.enabled else 0, payload.interval_minutes, payload.scope,
+        "INSERT INTO targets(project_id, name, base_url, enabled, interval_minutes, scope, "
+        "max_depth, max_assets, include_sourcemaps, probe_common_config, tags, notes, "
+        "created_at, next_scan_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (project_id, name, url, 1 if payload.enabled else 0, payload.interval_minutes, payload.scope,
          payload.max_depth, payload.max_assets, 1 if payload.include_sourcemaps else 0,
          1 if payload.probe_common_config else 0, payload.tags, payload.notes, now, now),
     ).lastrowid
@@ -484,6 +603,7 @@ def create_target(payload: TargetIn) -> dict[str, Any]:
 @app.post("/api/targets/import")
 def import_targets(payload: TargetImportIn) -> dict[str, Any]:
     """批量导入站点。域名、URL、带路径的 URL 都能吃；自动补 https:// 并按主机去重。"""
+    project_id = _resolve_project_id(payload.project_id)
     raw: list[str] = list(payload.urls)
     if payload.text:
         raw.extend(payload.text.splitlines())
@@ -528,10 +648,11 @@ def import_targets(payload: TargetImportIn) -> dict[str, Any]:
             continue
         try:
             tid = db.execute(
-                "INSERT INTO targets(name, base_url, enabled, interval_minutes, scope, max_depth, max_assets, "
-                "include_sourcemaps, probe_common_config, tags, notes, created_at, next_scan_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (host, url, 1 if payload.enabled else 0, payload.interval_minutes, "same-origin",
+                "INSERT INTO targets(project_id, name, base_url, enabled, interval_minutes, scope, "
+                "max_depth, max_assets, include_sourcemaps, probe_common_config, tags, notes, "
+                "created_at, next_scan_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (project_id, host, url, 1 if payload.enabled else 0, payload.interval_minutes,
+                 "same-origin",
                  payload.max_depth, payload.max_assets, 1, 1 if payload.probe_common_config else 0,
                  "", payload.notes, now, now),
             ).lastrowid
@@ -578,15 +699,20 @@ def scan_batch(payload: dict[str, Any] | None = None) -> dict[str, Any]:
 async def bulk_targets(payload: TargetBulkIn) -> dict[str, Any]:
     """站点批量操作: 启用 / 暂停 / 删除 / 立即扫描 / 统一改巡检周期。"""
     action = (payload.action or "").strip().lower()
-    if action not in ("enable", "disable", "delete", "scan", "interval"):
-        raise HTTPException(400, "action 需为 enable / disable / delete / scan / interval")
+    if action not in ("enable", "disable", "delete", "scan", "interval", "move"):
+        raise HTTPException(400, "action 需为 enable / disable / delete / scan / interval / move")
     if payload.all_matching:
         # "全选所有匹配": 只信任服务端自己解析出来的 id, 避免前端把上千个 id 全塞进请求体
+        conditions: list[str] = []
+        params: list[Any] = []
         if payload.q:
-            rows = db.query("SELECT id FROM targets WHERE name LIKE ? OR base_url LIKE ?",
-                            (f"%{payload.q}%", f"%{payload.q}%"))
-        else:
-            rows = db.query("SELECT id FROM targets")
+            conditions.append("(t.name LIKE ? OR t.base_url LIKE ?)")
+            params.extend([f"%{payload.q}%", f"%{payload.q}%"])
+        if payload.project_filter_id is not None:
+            conditions.append("t.project_id=?")
+            params.append(int(payload.project_filter_id))
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        rows = db.query("SELECT t.id FROM targets t" + where, params)
         ids = [int(row["id"]) for row in rows]
     else:
         ids = [int(i) for i in payload.ids]
@@ -594,6 +720,8 @@ async def bulk_targets(payload: TargetBulkIn) -> dict[str, Any]:
         raise HTTPException(400, "未选择任何站点")
     if action == "interval" and not payload.interval_minutes:
         raise HTTPException(400, "请提供 interval_minutes")
+    if action == "move" and payload.project_id is None:
+        raise HTTPException(400, "请提供 project_id")
 
     marks = ",".join("?" * len(ids))
     if action == "delete":
@@ -611,6 +739,11 @@ async def bulk_targets(payload: TargetBulkIn) -> dict[str, Any]:
     elif action == "interval":
         db.execute(f"UPDATE targets SET interval_minutes=? WHERE id IN ({marks})",
                    (payload.interval_minutes, *ids))
+        affected = len(ids)
+    elif action == "move":
+        project_id = _resolve_project_id(payload.project_id)
+        db.execute(f"UPDATE targets SET project_id=? WHERE id IN ({marks})",
+                   (project_id, *ids))
         affected = len(ids)
     else:  # scan
         affected = 0
@@ -636,6 +769,8 @@ def update_target(tid: int, payload: TargetPatch) -> dict[str, Any]:
     for key, value in payload.model_dump(exclude_none=True).items():
         if key == "base_url":
             value = _normalize_url(value)
+        if key == "project_id":
+            value = _resolve_project_id(int(value))
         if key in ("include_sourcemaps", "probe_common_config", "enabled"):
             value = 1 if value else 0
         fields[key] = value
