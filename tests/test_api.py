@@ -186,6 +186,37 @@ def test_cancel_target_drops_queued_scan() -> None:
     assert sched.cancel_target(999999) is False        # 不存在的站点不报错
 
 
+def test_cancelled_scan_does_not_kill_worker(monkeypatch, client) -> None:
+    """硬超时只能取消扫描子任务，worker 必须继续消费队列。"""
+    import asyncio
+    import contextlib
+
+    from app import scheduler as scheduler_mod
+
+    async def scenario() -> None:
+        sched = scheduler_mod.Scheduler()
+        started = asyncio.Event()
+
+        async def fake_scan(_target, full=False):
+            started.set()
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(scheduler_mod, "scan_target", fake_scan)
+        worker = asyncio.create_task(sched._worker(0))
+        await sched._queue.put(({"id": 4243, "name": "running"}, False))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert sched.cancel_target(4243) is True
+        await asyncio.sleep(0.05)
+        assert worker.done() is False, "取消单个扫描不应终止 worker"
+        assert 4243 not in sched.state.tasks
+
+        worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker
+
+    asyncio.run(scenario())
+
+
 def test_reap_stale_running_scans(client) -> None:
     from datetime import datetime, timedelta, timezone
 

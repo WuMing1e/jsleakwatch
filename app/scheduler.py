@@ -257,11 +257,12 @@ class Scheduler:
                 tid = int(target["id"])
                 self.state.queued = [t for t in self.state.queued if int(t["id"]) != tid]
                 self.state.running[tid] = db.utcnow()
-                current = asyncio.current_task()
-                if current is not None:
-                    self.state.tasks[tid] = current
+                # 扫描必须是独立子任务。若直接把 worker 任务存进 tasks，
+                # cancel_target()/stale reaper 会把整个 worker 一并杀死。
+                scan_task = asyncio.create_task(scan_target(target, full=full))
+                self.state.tasks[tid] = scan_task
                 try:
-                    result = await scan_target(target, full=full)
+                    result = await scan_task
                     self.state.scans_completed += 1
                     self.state.last_summary[tid] = {
                         "at": db.utcnow(),
@@ -278,7 +279,10 @@ class Scheduler:
                                (reason, db.utcnow(), tid))
                     db.log_event(f"{reason}: {target.get('name')}", kind="scan", level="warn",
                                  target_id=tid)
-                    raise
+                    # stop() 会先设置停止标记再取消 worker。只有服务停止时
+                    # 退出协程；单站点的 stale/删除取消要继续消费队列。
+                    if self._stop.is_set():
+                        raise
                 except Exception as exc:  # noqa: BLE001
                     db.log_event(
                         f"扫描 {target.get('name')} 失败: {exc}", kind="scan", level="error",
