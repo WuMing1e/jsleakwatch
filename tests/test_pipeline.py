@@ -253,6 +253,73 @@ def test_headless_render_finds_runtime_only_addresses(prepared) -> None:
         db.set_setting("scan", previous)
 
 
+def test_runtime_phase_timeout_returns_diagnostic(monkeypatch) -> None:
+    """浏览器启动/关闭等整体步骤必须有超时，不能拖到扫描硬时限。"""
+    import asyncio
+
+    from app import scanner
+    from app.config import ScanConfig
+
+    async def hang(*_args, **_kwargs):
+        await asyncio.sleep(10)
+        return [], []
+
+    monkeypatch.setattr(scanner, "collect_runtime_seeds", hang)
+    monkeypatch.setattr(scanner, "_runtime_phase_timeout", lambda _cfg: 0.05)
+    seeds, notes = asyncio.run(scanner._collect_runtime_seeds_guarded(
+        {"base_url": "https://timeout.test/"}, ScanConfig(), None,
+    ))
+    assert seeds == []
+    assert any("整体时限" in note for note in notes)
+
+
+def test_static_scan_continues_after_browser_phase_timeout(prepared, monkeypatch) -> None:
+    """浏览器阶段超时不能阻断 HTML/JS 静态采集。"""
+    import asyncio
+    import importlib
+
+    from app import scanner
+
+    _target, db = prepared
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path.startswith("/app.js"):
+                body, ctype = b"var ok = true;", "application/javascript"
+            else:
+                body, ctype = PLAIN_PAGE.encode(), "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server, url = _serve(Handler)
+    previous = db.get_setting("scan") or {}
+    db.set_setting("scan", {**previous, "headless_render": True})
+    importlib.reload(scanner)
+
+    async def hang(*_args, **_kwargs):
+        await asyncio.sleep(10)
+        return [], []
+
+    monkeypatch.setattr(scanner, "collect_runtime_seeds", hang)
+    monkeypatch.setattr(scanner, "_runtime_phase_timeout", lambda _cfg: 0.05)
+    try:
+        target = _new_target(db, url)
+        result = asyncio.run(scanner.scan_target(target))
+    finally:
+        db.set_setting("scan", previous)
+        server.shutdown()
+        server.server_close()
+
+    assert result.assets_fetched >= 2, "静态入口和 app.js 应继续采集"
+    assert result.runtime_seeds == 0
+    assert "整体时限" in result.render_note
+
+
 def test_interactive_render_stores_runtime_api_assets(prepared) -> None:
     """Playwright 路由采集拿到的运行时请求也要进入统一接口资产。"""
     import asyncio

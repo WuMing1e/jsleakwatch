@@ -242,6 +242,33 @@ async def collect_runtime_seeds(
     return seeds, notes
 
 
+def _runtime_phase_timeout(cfg: ScanConfig) -> float:
+    """浏览器增强阶段整体超时，覆盖排队、启动、导航、关闭和 AI 探索。"""
+    explicit = os.getenv("JSLW_BROWSER_PHASE_SECONDS", "").strip()
+    if explicit:
+        try:
+            return max(30.0, min(900.0, float(explicit)))
+        except ValueError:
+            pass
+    pages = max(1, int(cfg.max_render_pages or 1))
+    return float(max(60, min(600, int(cfg.timeout_seconds * pages * 2))))
+
+
+async def _collect_runtime_seeds_guarded(
+    target: dict[str, Any],
+    cfg: ScanConfig,
+    extractor: Extractor,
+) -> tuple[list[Candidate], list[str]]:
+    timeout = _runtime_phase_timeout(cfg)
+    try:
+        return await asyncio.wait_for(
+            collect_runtime_seeds(target, cfg, extractor),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        return [], [f"浏览器采集超过整体时限 {int(timeout)}s，已跳过并继续静态扫描"]
+
+
 async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
     import time
 
@@ -304,7 +331,9 @@ async def scan_target(target: dict[str, Any], full: bool = False) -> ScanResult:
         # 可选: 无头浏览器把页面真跑一遍, 补出"执行后才出现"的脚本与运行时接口地址
         runtime_seeds: list[Candidate] = []
         if cfg.headless_render or cfg.interactive_render or cfg.ai_discovery:
-            runtime_seeds, runtime_notes = await collect_runtime_seeds(target, cfg, extractor)
+            runtime_seeds, runtime_notes = await _collect_runtime_seeds_guarded(
+                target, cfg, extractor,
+            )
             result.runtime_seeds = len(runtime_seeds)
             # 无头渲染只是"增强": 它失败说明没拿到运行时地址, 但静态采集该做的都做完了。
             # 记成告警事件而不是扫描错误, 否则半个站点池都会显示成"部分成功"。
